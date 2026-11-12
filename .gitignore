@@ -1,0 +1,4 @@
+*.elc
+*~
+HANDOFF.md
+*-autoloads.el

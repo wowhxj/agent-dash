@@ -1,0 +1,16 @@
+#!/bin/sh
+# Offline stand-in for `claude -p' stream-json: canned answers, no model calls.
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"init","response":{"models":[{"value":"opus"}]}}}\n' ;;
+    *'"type":"user"'*)
+      u=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')
+      printf '{"type":"system","subtype":"init","uuid":"i-%s","model":"opus","permissionMode":"default"}\n' "$u"
+      printf '{"type":"user","uuid":"%s","message":{"role":"user","content":"hi"}}\n' "$u"
+      printf '{"type":"stream_event","uuid":"s1-%s","event":{"type":"message_start","message":{"id":"m-%s"}}}\n' "$u" "$u"
+      printf '{"type":"stream_event","uuid":"s2-%s","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}}\n' "$u"
+      printf '{"type":"assistant","uuid":"a-%s","message":{"id":"m-%s","model":"opus","content":[{"type":"text","text":"Hello"}]}}\n' "$u" "$u"
+      printf '{"type":"result","uuid":"r-%s","subtype":"success","result":"Hello"}\n' "$u" ;;
+  esac
+done

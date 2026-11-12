@@ -1,0 +1,20 @@
+#!/bin/sh
+# Offline stand-in for `pi --mode rpc': canned answers, no model calls.
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"get_state"'*)
+      printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"model":{"id":"m1"},"thinkingLevel":"high","isStreaming":false}}\n' "$id" ;;
+    *'"get_messages"'*)
+      printf '{"id":"%s","type":"response","command":"get_messages","success":true,"data":{"messages":[{"role":"user","content":"old","timestamp":1}]}}\n' "$id" ;;
+    *'"prompt"'*)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      printf '{"type":"agent_start"}\n'
+      printf '{"type":"message_start","message":{"role":"user","content":"hello 你好","timestamp":4}}\n'
+      printf '{"type":"message_end","message":{"role":"user","content":"hello 你好","timestamp":4}}\n'
+      printf '{"type":"message_start","message":{"role":"assistant","content":[],"timestamp":5}}\n'
+      printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hi"}}\n'
+      printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi!"}],"timestamp":5}}\n'
+      printf '{"type":"agent_settled","aborted":false}\n' ;;
+  esac
+done
