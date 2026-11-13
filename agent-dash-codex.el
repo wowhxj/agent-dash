@@ -186,9 +186,13 @@ Return (ITEM-ID . WHOLE-TEXT)."
          (agent-dash-set-data session :turn (agent-dash-jget params "turn" "id"))
          (agent-dash-emit session '(:type run :state running)))
         ("turn/completed"
-         (agent-dash-emit session '(:type run :state idle))
+         (when (or (agent-dash-jget params "turn" "error")
+                   (when-let* ((status (agent-dash-jget params "turn" "status")))
+                     (not (equal status "completed"))))
+           (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
          (when-let* ((error (agent-dash-jget params "turn" "error" "message")))
-           (agent-dash-emit session (list :type 'notice :level 'error :text error))))
+           (agent-dash-emit session (list :type 'notice :level 'error :text error)))
+         (agent-dash-emit session '(:type run :state idle)))
         ((or "item/started" "item/completed")
          (agent-dash-codex--item session (agent-dash-jget params "item")))
         ("item/agentMessage/delta"
@@ -232,17 +236,19 @@ Return (ITEM-ID . WHOLE-TEXT)."
                                      (list :cwd (directory-file-name
                                                  (agent-dash-session-root session)))))))))
 
-(defun agent-dash-codex--report (session &optional images)
-  "Return a callback reporting a failed SESSION request, recovering IMAGES when safe."
+(defun agent-dash-codex--report (session &optional images queue-id)
+  "Return a callback for SESSION, recovering IMAGES or settling QUEUE-ID."
   (let ((token (agent-dash-data session :image-draft-token)))
     (lambda (_result error)
+      (agent-dash-delivery-result session queue-id (not error))
       (when error
-        (if images (agent-dash-image-send-failed session token error)
+        (if (and images (not queue-id)) (agent-dash-image-send-failed session token error)
           (agent-dash-emit session (list :type 'notice :level 'error :text error)))))))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql codex)) session text images mode)
   "Codex `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
   (let ((sid (or (agent-dash-data session :sid) (user-error "Codex has no thread yet")))
+        (report (agent-dash-codex--report session images (agent-dash-data session :queue-sending)))
         (input (vconcat (unless (string-empty-p text) (list (list :type "text" :text text)))
                         (mapcar (lambda (image) (list :type "image"
                                                       :url (agent-dash-image-data-url image)))
@@ -251,12 +257,12 @@ Return (ITEM-ID . WHOLE-TEXT)."
         (agent-dash-holder-request session "turn/steer"
                                    (list :threadId sid :input input
                                          :expectedTurnId (agent-dash-data session :turn))
-                                   (agent-dash-codex--report session images))
+                                   report)
       (agent-dash-holder-request session "turn/start"
                                  (append (list :threadId sid :input input)
                                          (when-let* ((model (agent-dash-data session :model)))
                                            (list :model model)))
-                                 (agent-dash-codex--report session images)))))
+                                 report))))
 
 (cl-defmethod agent-dash-backend-cancel ((_ (eql codex)) session)
   "Codex `agent-dash-backend-cancel' for SESSION."

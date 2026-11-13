@@ -12,6 +12,7 @@
 (require 'agent-dash-core)
 (require 'agent-dash-input)
 (require 'agent-dash-images)
+(require 'agent-dash-queue)
 (require 'markdown-mode)
 
 (defgroup agent-dash-ui nil "Chat buffer of `agent-dash'." :group (quote agent-dash))
@@ -97,10 +98,9 @@ The prompt history keeps the text as typed.")
               'face 'agent-dash-assistant-face))
 
 (defun agent-dash--item-folded-p (item)
-  "Whether ITEM's details are folded, honoring a manual override."
-  (if (plist-member item :folded)
-      (not (eq (plist-get item :folded) 'open))
-    (not (plist-get item :process-active))))
+  "Whether ITEM's details are folded, independently of its Process group.
+Details stay folded until explicitly opened by the user."
+  (not (eq (plist-get item :folded) 'open)))
 
 (defun agent-dash--item-body (session item)
   "Return the display body of timeline ITEM of SESSION."
@@ -331,8 +331,10 @@ visibility choices survive intermediate updates, but not the finish transition."
     (let* ((state (agent-dash-session-state s))
            (running (eq state 'running))
            (queue (agent-dash-session-queue s))
-           (steering (length (plist-get queue :steering)))
-           (follow-up (length (plist-get queue :follow-up)))
+           (steering (+ (length (plist-get queue :steering))
+                        (length (agent-dash-queue-pending s 'steer))))
+           (follow-up (+ (length (plist-get queue :follow-up))
+                         (length (agent-dash-queue-pending s 'follow-up))))
            (phase (plist-get (agent-dash-session-meta s) :phase))
            (requests (length (agent-dash-session-requests s)))
            (name (agent-dash--backend-name (agent-dash-session-backend s)))
@@ -346,7 +348,9 @@ visibility choices survive intermediate updates, but not the finish transition."
                 (when running
                   (format " %c" (aref "|/-\\" (mod agent-dash--spinner-index 4))))
                 (when (> (+ steering follow-up) 0)
-                  (format " [S%d F%d]" steering follow-up))
+                  (format " [S%d F%d%s]" steering follow-up
+                          (if (and (agent-dash-data s :queue-paused)
+                                   (agent-dash-queue-pending s)) " paused" "")))
                 (when (> requests 0) (format " ?%d" requests))))
        'face 'agent-dash-status-face
        'help-echo
@@ -354,7 +358,8 @@ visibility choices survive intermediate updates, but not the finish transition."
                (when (and running phase) (concat " · " phase))
                (when (> requests 0) "\nC-c C-a: answer pending requests")
                (when (> (+ steering follow-up) 0)
-                 "\nS: steering; F: follow-up"))))))
+                 (concat "\nS: steering; F: follow-up (local pending + native reported)."
+                         "\nC-c q: manage local queue.")))))))
 
 (defun agent-dash--format-tokens (value)
   "Format known token VALUE compactly."
@@ -493,6 +498,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (define-key map (kbd "M-n") #'agent-dash-next-prompt)
     (define-key map (kbd "C-c C-c") #'agent-dash-send)
     (define-key map (kbd "C-c C-s") #'agent-dash-steer)
+    (define-key map (kbd "C-c q") #'agent-dash-queue)
     (define-key map (kbd "C-c C-k") #'agent-dash-cancel)
     (define-key map (kbd "C-c C-q") #'agent-dash-quit)
     (define-key map (kbd "C-c C-i") #'agent-dash-focus-input)
@@ -604,6 +610,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (agent-dash--stop-spinner)
   (agent-dash--stop-answer-timer)
   (when-let* ((s agent-dash--session))
+    (when (agent-dash-queue-managed-p s) (agent-dash-queue-disconnect s))
     (setq agent-dash--sessions (delq s agent-dash--sessions))
     (unless agent-dash--quitting
       (agent-dash-backend-detach (agent-dash-session-backend s) s))))
@@ -642,28 +649,37 @@ Return the session."
          (auth (and (eq (agent-dash-session-backend s) 'pi)
                     (string-match-p "\\`/\\(?:login\\|logout\\)\\(?:[[:space:]]\\|\\'\\)" text))))
     (when (and (string-empty-p text) (not images)) (user-error "Nothing to send"))
+    (when (and (eq mode 'steer) (string-prefix-p "/" text))
+      (user-error "Slash commands cannot be staged as steering; use RET"))
     (when (and images (string-prefix-p "/" text))
       (user-error "Remove images before running slash commands"))
     (when images
       (agent-dash-image--check-chat)
       (mapc #'agent-dash-image-bytes images))
     (unless (agent-dash-input-dispatch text)
-      (setq mode (or mode (if (eq (agent-dash-session-state s) 'running)
+      (setq mode (or mode (if (or (eq (agent-dash-session-state s) 'running)
+                                  (agent-dash-queue-managed-p s))
                               'follow-up 'prompt)))
-      (when images
-        (setq agent-dash--last-image-draft (list :text (agent-dash--input) :images images)))
-      (agent-dash-set-data s :image-draft-token (and images agent-dash--last-image-draft))
-      (agent-dash-set-data s :image-send-error nil)
-      ;; Clear only after the backend accepted the write; errors keep the draft.
-      (let ((sent (if auth text
-                    (seq-reduce (lambda (acc f) (funcall f acc))
-                                agent-dash-prompt-filter-functions text)))
-            (backend (agent-dash-session-backend s)))
-        (if (string-prefix-p "/" text)
-            (agent-dash-backend-command backend s sent mode)
-          (agent-dash-backend-send backend s sent images mode)))
-      (when (and images (eq (agent-dash-data s :image-send-error)
-                            agent-dash--last-image-draft))
+      (let ((queued (and (not auth) (not (string-prefix-p "/" text))
+                         (memq mode '(follow-up steer)))))
+        (when (and images (not queued))
+          (setq agent-dash--last-image-draft (list :text (agent-dash--input) :images images)))
+        (agent-dash-set-data s :image-draft-token
+                             (and images (not queued) agent-dash--last-image-draft))
+        (agent-dash-set-data s :image-send-error nil)
+        ;; Queuing is atomic. Failures leave the original composer untouched.
+        (if queued
+            (agent-dash-queue-add s text images mode)
+          (let ((sent (if auth text
+                        (seq-reduce (lambda (acc f) (funcall f acc))
+                                    agent-dash-prompt-filter-functions text)))
+                (backend (agent-dash-session-backend s)))
+            (if (string-prefix-p "/" text)
+                (agent-dash-backend-command backend s sent mode)
+              (agent-dash-backend-send backend s sent images mode)))))
+      ;; Local enqueue has no direct-send token. Two nil values are not a failure.
+      (when-let* ((token (and images (agent-dash-data s :image-draft-token)))
+                  ((eq (agent-dash-data s :image-send-error) token)))
         (user-error "Image submission rejected; draft kept"))
       (unless auth (push text agent-dash--history))
       (setq agent-dash--history-index -1 agent-dash--history-draft nil)
@@ -674,10 +690,12 @@ Return the session."
 (defun agent-dash-send ()
   "Send the draft; while the agent runs it queues as a follow-up."
   (interactive)
-  (agent-dash--submit nil))
+  (if (derived-mode-p 'agent-dash-queue-edit-mode)
+      (agent-dash-queue-edit-save)
+    (agent-dash--submit nil)))
 
 (defun agent-dash-steer ()
-  "Send the draft to steer the running task."
+  "Stage the draft as steering; apply it explicitly in `agent-dash-queue'."
   (interactive)
   (unless (agent-dash-capability agent-dash--session :steer)
     (user-error "This backend cannot steer"))
@@ -812,6 +830,8 @@ Return the session."
 (defun agent-dash-cancel ()
   "Stop the current task; the session continues."
   (interactive)
+  (when (agent-dash-queue-managed-p agent-dash--session)
+    (agent-dash-queue-disconnect agent-dash--session))
   (agent-dash-backend-cancel (agent-dash-session-backend agent-dash--session)
                              agent-dash--session))
 

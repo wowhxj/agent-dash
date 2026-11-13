@@ -1,7 +1,7 @@
 EMACS ?= emacs
 # Existing package dir providing elisp-lint, package-lint and declared deps.
 ELPA ?= $(HOME)/.emacs.d.default/elpa
-ELISP = agent-dash-core.el agent-dash-images.el agent-dash-input.el agent-dash-ui.el agent-dash-holder.el agent-dash-pi-commands.el agent-dash-pi.el agent-dash-claude.el agent-dash-dsh.el agent-dash-codex.el agent-dash-hermes.el agent-dash-summary.el agent-dash-hub.el agent-dash-search.el agent-dash.el
+ELISP = agent-dash-core.el agent-dash-images.el agent-dash-input.el agent-dash-queue.el agent-dash-ui.el agent-dash-holder.el agent-dash-pi-commands.el agent-dash-pi.el agent-dash-claude.el agent-dash-dsh.el agent-dash-codex.el agent-dash-hermes.el agent-dash-summary.el agent-dash-hub.el agent-dash-search.el agent-dash.el
 INIT = --eval '(setq package-user-dir "$(ELPA)")' -f package-initialize
 # Tests never start background summaries: they would read real sessions and call models.
 OFFLINE = --eval '(setq agent-dash-summary-enable nil)'

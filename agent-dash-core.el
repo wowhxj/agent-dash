@@ -24,6 +24,9 @@
 (defvar agent-dash-backends nil
   "Backend symbols available to `agent-dash'; each backend file adds one.")
 
+(defvar agent-dash-event-functions nil
+  "Abnormal hook receiving (SESSION EVENT), including lifecycle-only events.")
+
 (defvar agent-dash-update-functions nil
   "Abnormal hook run as (SESSION ITEM) after an event changed ITEM.
 ITEM is nil when only session-level state (run, queue, meta) changed.")
@@ -199,9 +202,18 @@ find an early match without reading small files twice."
          (setq item (agent-dash--upsert
                      session (list :id (plist-get dialog :id) :type 'request
                                    :status (or (plist-get event :status) 'answered))))))
+      ((or 'delivery 'local-queue) nil)
       (type (error "Unknown agent-dash event type: %S" type)))
+    (run-hook-with-args 'agent-dash-event-functions session event)
     (run-hook-with-args 'agent-dash-update-functions session item)
     item))
+
+(defun agent-dash-delivery-result (session queue-id accepted &optional started)
+  "Report ACCEPTED and optional STARTED for SESSION's QUEUE-ID.
+A nil QUEUE-ID belongs to the ordinary composer, not the local queue."
+  (when queue-id
+    (agent-dash-emit session (list :type 'delivery :queue-id queue-id
+                                   :accepted accepted :started started))))
 
 ;;;; Backend interface (docs/DESIGN.md §3)
 

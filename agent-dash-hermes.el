@@ -126,7 +126,8 @@ A change of kind, or a tool call in between, starts a new item."
       (_
        (cond
         ((not method)
-         (unless (agent-dash-holder-settle session record)
+         (progn
+           (agent-dash-holder-settle session record)
            (let ((result (agent-dash-jget record "result")))
              (when-let* ((sid (agent-dash-jget result "sessionId")))
                (unless (agent-dash-data session :sid) (agent-dash-holder-set-sid session sid)))
@@ -195,6 +196,7 @@ A change of kind, or a tool call in between, starts a new item."
     (user-error "This Hermes server does not support image prompts"))
   (let* ((sid (or (agent-dash-data session :sid) (user-error "Hermes has no session yet")))
          (token (agent-dash-data session :image-draft-token))
+         (queue-id (agent-dash-data session :queue-sending))
          (blocks (mapcar (lambda (image) (list :type "image" :data (plist-get image :data)
                                                :mimeType (plist-get image :mime-type))) images)))
     (agent-dash-holder-log session (list :type "agent_dash_user" :id (agent-dash-uuid)
@@ -203,8 +205,13 @@ A change of kind, or a tool call in between, starts a new item."
      session "session/prompt"
      (list :sessionId sid :prompt (vconcat (unless (string-empty-p text)
                                              (list (list :type "text" :text text))) blocks))
-     (when images
-       (lambda (_result error) (when error (agent-dash-image-send-failed session token error)))))))
+     (when (or images queue-id)
+       (lambda (result error)
+         (agent-dash-delivery-result
+          session queue-id (and (not error)
+                                (member (agent-dash-jget result "stopReason") '(nil "end_turn"))))
+         (when (and error images (not queue-id))
+           (agent-dash-image-send-failed session token error)))))))
 
 (cl-defmethod agent-dash-backend-cancel ((_ (eql hermes)) session)
   "Hermes `agent-dash-backend-cancel' for SESSION."

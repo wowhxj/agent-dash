@@ -218,6 +218,7 @@
      (agent-dash-pi-native-record session record))
     ("response" (agent-dash-pi--response session record))
     ("agent_start"
+     (agent-dash-set-data session :queue-pi-stop nil)
      (agent-dash-emit session '(:type meta :phase "waiting for model"))
      (agent-dash-emit session '(:type run :state running)))
     ("agent_end"
@@ -225,6 +226,8 @@
        (agent-dash-emit session (list :type 'request-done :id (plist-get request :id)
                                       :status 'cancelled))))
     ("agent_settled"
+     (when (member (agent-dash-data session :queue-pi-stop) '("error" "aborted"))
+       (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
      (agent-dash-emit session '(:type run :state idle))
      (agent-dash-pi--refresh-stats session))
     ("message_start"
@@ -237,6 +240,8 @@
      (agent-dash-pi--stream session (agent-dash-jget record "assistantMessageEvent")))
     ("message_end"
      (let ((message (agent-dash-jget record "message")))
+       (when (equal (agent-dash-jget message "role") "assistant")
+         (agent-dash-set-data session :queue-pi-stop (agent-dash-jget message "stopReason")))
        (agent-dash-pi--message
         session message
         (and (equal (agent-dash-jget message "role") "assistant")
@@ -380,7 +385,8 @@ Keep pre-compaction messages, but never replay abandoned branches."
       (progn
         (when images (user-error "Remove images before running Pi commands"))
         (agent-dash-backend-command 'pi session text mode))
-    (let ((token (agent-dash-data session :image-draft-token)))
+    (let ((token (agent-dash-data session :image-draft-token))
+          (queue-id (agent-dash-data session :queue-sending)))
       (agent-dash-pi--request
        session
        (append (list :type "prompt" :message text)
@@ -393,8 +399,9 @@ Keep pre-compaction messages, but never replay abandoned branches."
                  ('follow-up '(:streamingBehavior "followUp"))
                  ('steer '(:streamingBehavior "steer"))))
        (lambda (ok _data error)
+         (agent-dash-delivery-result session queue-id ok)
          (unless ok
-           (if images (agent-dash-image-send-failed session token error)
+           (if (and images (not queue-id)) (agent-dash-image-send-failed session token error)
              (agent-dash-emit session (list :type 'notice :level 'error
                                             :text (format "Not sent (%s); M-p recalls it"
                                                           error))))))))))

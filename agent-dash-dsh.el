@@ -378,6 +378,8 @@ This runs on protocol input, never during display-only redraw."
                                                 'error 'success))))))
         ("turn/start" (agent-dash-emit session '(:type run :state running)))
         ("turn/end"
+         (unless (member (agent-dash-jget data "reason" "kind") '(nil "completed"))
+           (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
          (agent-dash-emit session '(:type run :state idle))
          (let ((kind (agent-dash-jget data "reason" "kind")))
            (unless (member kind '(nil "completed"))
@@ -586,18 +588,22 @@ This runs on protocol input, never during display-only redraw."
 
 (defun agent-dash-dsh--prompt (session text mode &optional images)
   "Submit TEXT and optional IMAGES as a normal prompt to SESSION using MODE."
-  (agent-dash-dsh--call
-   "session/prompt"
-   (list :request (list :requestId (agent-dash-uuid)
-                        :sessionId (agent-dash-data session :sid)
-                        :mode (if (eq mode 'steer) "steer" "queue")
-                        :content (vconcat
-                                  (unless (string-empty-p text)
-                                    (list (list :type "text" :text text)))
-                                  (mapcar (lambda (image)
-                                            (list :type "image"
-                                                  :mediaType (plist-get image :mime-type)
-                                                  :data (plist-get image :data))) images))))))
+  (when (and (agent-dash-data session :queue-sending) (not agent-dash-dsh--host))
+    (user-error "Reconnect DSH before sending the local queue"))
+  (apply #'agent-dash-dsh--call
+         "session/prompt"
+         (list :request (list :requestId (agent-dash-uuid)
+                              :sessionId (agent-dash-data session :sid)
+                              :mode (if (eq mode 'steer) "steer" "queue")
+                              :content (vconcat
+                                        (unless (string-empty-p text)
+                                          (list (list :type "text" :text text)))
+                                        (mapcar (lambda (image)
+                                                  (list :type "image"
+                                                        :mediaType (plist-get image :mime-type)
+                                                        :data (plist-get image :data))) images))))
+         ;; A lost reply must never automatically replay a queued model request.
+         (when (agent-dash-data session :queue-sending) '(t))))
 
 (cl-defmethod agent-dash-backend-commands ((_ (eql dsh)) session)
   "Read SESSION's Host commands and registered skills without invoking a model."

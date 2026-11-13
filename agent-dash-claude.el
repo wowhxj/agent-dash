@@ -228,6 +228,8 @@ CALLBACK, if non-nil, receives the response."
                (last (car (last (agent-dash-session-items session)))))
            (cond
             ((agent-dash-jget e "is_error")
+             (when (agent-dash-data session :queue-claude-started)
+               (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
              (agent-dash-emit session (list :type 'notice :id uuid :level 'error
                                             :text (if (stringp text) text
                                                     (agent-dash-jget e "subtype")))))
@@ -244,6 +246,9 @@ CALLBACK, if non-nil, receives the response."
            (when (equal (agent-dash-jget e "state") "queued")
              (setq queued (append queued (list id))))
            (agent-dash-set-data session :queued queued)
+           (when (and (equal id (agent-dash-data session :queue-claude-uuid))
+                      (member (agent-dash-jget e "state") '("started" "running")))
+             (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) t t))
            (agent-dash-claude--queue session)))
         ("control_request"
          (if (equal (agent-dash-jget e "request" "subtype") "can_use_tool")
@@ -349,8 +354,10 @@ Recover the startup record for sessions opened before this feature loaded."
 
 (cl-defmethod agent-dash-backend-send ((_ (eql claude)) session text images mode)
   "Claude `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
-  (when (eq mode 'steer) (agent-dash-claude--control session "interrupt"))
   (let ((uuid (agent-dash-uuid)))
+    (when (agent-dash-data session :queue-sending)
+      (agent-dash-set-data session :queue-claude-uuid uuid))
+    (when (eq mode 'steer) (agent-dash-claude--control session "interrupt"))
     (agent-dash-holder-write
      session (list :type "user" :uuid uuid
                    :message (list :role "user"

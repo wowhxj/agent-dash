@@ -37,13 +37,19 @@
 
 (ert-deftest agent-dash-test-send-while-running-is-follow-up ()
   (agent-dash-test-with-chat
+   (setq agent-dash-fake-calls nil)
    (agent-dash-emit session '(:type run :state running))
    (goto-char (point-max))
    (insert "next")
    (agent-dash-send)
-   (should (equal (car agent-dash-fake-calls) '(send "next" nil follow-up)))
+   (should-not agent-dash-fake-calls)
+   (should (equal (plist-get (car (agent-dash-queue-pending session 'follow-up)) :text) "next"))
    (insert "turn")
    (agent-dash-steer)
+   (should-not agent-dash-fake-calls)
+   (let ((entry (car (agent-dash-queue-pending session 'steer))))
+     (should (equal (plist-get entry :text) "turn"))
+     (agent-dash-queue-apply session (plist-get entry :id)))
    (should (equal (car agent-dash-fake-calls) '(send "turn" nil steer)))))
 
 (ert-deftest agent-dash-test-empty-draft-is-not-sent ()

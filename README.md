@@ -31,17 +31,18 @@ Requires Emacs 29.1+, `markdown-mode`, `websocket`, `transient`, and the CLIs of
 
 ### Chat buffer
 
-User turns are highlighted; the bottom `You>` composer stays editable while history is read-only. The latest prompt is pinned above the conversation. Tools and thinking-only messages are grouped under `Process · N steps` per user turn. The active turn and its step details expand automatically; when the backend confirms the entire run has ended, the group folds and the final answer stays visible. `RET`/`TAB` still toggles groups or individual details; manual choices persist during streaming. A single final message does not prematurely fold an ongoing run.
+User turns are highlighted; the bottom `You>` composer stays editable while history is read-only. The latest prompt is pinned above the conversation. Tools and thinking-only messages are grouped under `Process · N steps` per user turn. Only the active Process group expands automatically, showing compact step summaries; individual thinking and tool details stay folded until manually opened. When the backend confirms the entire run has ended, the group folds and the final answer stays visible. `RET`/`TAB` still toggles groups or individual details; manual choices persist during streaming. A single final message does not prematurely fold an ongoing run.
 
 All five backends share the same layout: statistics on the top left, provider/model and thinking level on the top right; the bottom mode line uses a compact activity indicator such as `Pi thinking |`, shared by all backends. Its `|/-\` animation runs only while active; idle/disconnected chats have no animation. Queues (`[S1 F2]`) and pending requests (`?1`) appear only when present; detailed phases and action hints are available on hover. Narrow windows drop lower-priority metrics first. The composer uses the same theme-derived background and no-underline face as emacs-pi. Pi reports cached context usage, session token totals, cache-read ratio and estimated cost (not a bill), refreshed on attachment and when it settles. DSH restores context, turns/steps, decoding speed, token totals and cache ratio from Host projections, with live control-stream updates; its right side also shows the agent preset and permission mode. DSH billing buckets are summed once, and no cost is invented. Unavailable backend statistics are omitted. Display redraws never issue RPC or model calls. The activity tooltip distinguishes phases such as `waiting for model` and `responding` without adding verbose text to the mode line. `M-x agent-dash-refresh-chat` rebuilds an open chat's presentation without restarting the agent or discarding its draft.
 
-This is not yet full interaction parity with emacs-pi/emacs-claude: clipboard image UI and queue editing remain unimplemented.
+Unsent text-and-image messages use a unified local queue; backend-native queues remain separate and read-only.
 
 | Key | Action |
 |---|---|
 | `RET` / `C-c C-c` | Send; while the agent runs, queue as a follow-up (`RET` answers pending dialogs first) |
 | `S-RET` | Newline |
-| `C-c C-s` | Steer the running task |
+| `C-c C-s` | Stage steering; apply the selected entry with `x` in the queue |
+| `C-c q` | View and manage the current session's multimodal queue |
 | `C-c C-k` | Stop the current task |
 | `C-c C-q` | Quit (see the table above) |
 | `C-c C-a` | Manually open pending permission requests and questions (also opened automatically) |
@@ -54,6 +55,31 @@ This is not yet full interaction parity with emacs-pi/emacs-claude: clipboard im
 | `M-p` / `M-n` | Browse sent prompts |
 | `TAB` / `RET` on a tool or thinking line | Fold / unfold |
 | `M-x agent-dash-select-model` | Switch model |
+
+### Multimodal queues
+
+While running, `RET` / `C-c C-c` stages one follow-up containing the entire text-and-image message. Follow-ups dispatch one at a time after the whole run settles, not after an intermediate final message. `C-c C-s` stages steering without injecting it. Open the queue with `C-c q`:
+
+| Queue key | Action |
+|---|---|
+| `RET` | Read a message and retained images, or a backend-native message summary |
+| `e` / `a` | Edit an unsent message / compose a new one |
+| `d` | Delete an unsent local message |
+| `n` / `p` | Next / previous message, skipping group headings |
+| `M-n` / `M-p` | Move down / up, crossing Steer/Follow at the boundary (`M-↓↑` also works) |
+| `f` / `s` | Stage a follow/steer conversion and pause automatic delivery |
+| `x` | Apply exactly one selected steering message to the running task |
+| `SPC` / `P` / `r` | Toggle automatic delivery / pause / continue follow-ups |
+| `?` | Open the transient menu; navigation/reordering stays open, `h` shows full notes |
+| `c` | Copy a failed/unknown payload into a NEW paused draft, never retry it |
+| `D` | Confirm forgetting a read-only receipt; never retract a delivery |
+| `o` | Show the owner chat; explicitly reconnect before continuing a detached queue |
+
+The compact view groups **Steer before Follow** and hides sent receipts. Only nonzero image counts and exceptional states appear beside messages; common shortcuts stay visible in the header/footer, with full instructions under `?`. Moving the last steer down puts it first in Follow; moving the first follow up appends it to Steer. Crossing groups stages a conversion and pauses delivery, never injecting anything automatically.
+
+Editors are isolated from the live draft. `C-c C-c` saves text and images atomically; `C-c C-q` cancels. Image paste, file attachment, removal and preview reuse the chat bindings. An edited head entry holds later follow-ups behind it. Handed-off entries are immediately read-only; both acknowledgement and whole-run completion are required before the next local handoff. Errors, disconnects and manual cancellation pause delivery without retrying. Pi/Codex/DSH retain native steering semantics; Claude still interrupts then submits new input, and Hermes rejects steering.
+
+Queues are **memory-only and lost on Emacs exit**. Closing a chat retains and pauses its queue; use `M-x agent-dash-queue` from a non-chat buffer to find it. Defaults: 100 retained entries and 64 MiB of image base64 per session. Successful deliveries retain lightweight text/image-count receipts; their images remain in chat history. Failed/unknown payloads retain all images. Native queues are never cleared or rewritten; cross-client submission ordering is not guaranteed.
 
 ### Questions and confirmations
 
