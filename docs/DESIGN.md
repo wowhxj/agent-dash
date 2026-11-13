@@ -36,20 +36,21 @@
 | `:type` | 其他字段 | 语义 |
 |---|---|---|
 | `user` | `:id :text :images` | 用户消息（以后端回显为准，客户端不预插入） |
-| `assistant` | `:id :text :thinking :final` | 助手消息。`:final nil` 时为流式快照（后端负责拼接 delta），`:final t` 为权威内容 |
-| `tool` | `:id :name :args :output :status` | 工具卡片。`:status` 取 `running` / `success` / `error`；同 id 多次发送即更新 |
+| `assistant` | `:id :text :thinking :final :images` | 助手消息。`:final nil` 时为流式快照（后端负责拼接 delta），`:final t` 为权威内容 |
+| `tool` | `:id :name :args :output :status :images` | 工具卡片。`:status` 取 `running` / `success` / `error`；同 id 多次发送即更新 |
 | `run` | `:state` | `running` / `idle`。只在后端确认“不会再自动继续”时发 `idle` |
 | `queue` | `:steering :follow-up` | 完整快照（字符串列表） |
 | `meta` | 任意 `meta` 键 | 合并进 `session-meta` |
 | `notice` | `:text :level` | `info` / `warning` / `error`；中断、压缩、重试、扩展错误等 |
 | `request` | `:id :kind :title :options :default :questions` | 需要用户回答：`kind` 取 `confirm` / `select` / `input` / `permission` / `questions`（`:questions` 是 `(:question :options :multi)` 列表；答案按问题顺序排列，单选为字符串，多选为字符串列表）。用 `agent-dash-backend-respond` 回答 |
-| `request-done` | `:id` | 请求被后端取消或已在别处回答 |
+| `request-done` | `:id :status` | 请求已回答或撤回；状态默认为 `answered`，取消/超时为 `cancelled`，重复完成事件幂等 |
 
 ponytail：`assistant` 用整段快照而不是 delta。好处是 reducer 无状态，回放幂等；代价是每次刷新都要复制整条消息的文本。消息过长导致流式卡顿时，再加 `:append`。
 
 ### 2.3 时间线条目
 
-`(:id ID :type user|assistant|tool|notice :start MARKER :end MARKER :folded BOOL . EVENT-FIELDS)`。
+`(:id ID :type user|assistant|tool|notice|request :start MARKER :end MARKER :folded BOOL . EVENT-FIELDS)`。
+`request` 同时保留在待回答队列和时间线中，显示条目使用 `(request . ID)` 命名空间，避免与工具 ID 冲突；完成后更新原卡片状态，不折叠进 Process。确认正文 `:message`、输入提示 `:placeholder` 不当作默认答案。当前聊天通过一次性 timer 自动进入 minibuffer；已有 minibuffer 或其他 Agent 的交互尚未结束时延后，后台聊天不抢焦点。`C-g` 归一为 `:cancelled`，由各后端转换为取消/拒绝/空答案，不能当作同意；等待期间被撤回的请求不再回复。
 重渲染时只删除并重新插入该条目自己的 `start..end` 区域，输入区不动。
 
 ## 3. 后端接口
@@ -68,7 +69,7 @@ ponytail：`assistant` 用整段快照而不是 delta。好处是 reducer 无状
 | `agent-dash-backend-transcript (backend id)` | 否 | hub 详情与 @ 引用：`((user . TEXT) (assistant . TEXT) …)` |
 | `agent-dash-backend-capabilities (backend)` | 是 | plist：`:quit stop\|detach`、`:steer`、`:images`、`:models` |
 | `agent-dash-backend-commands (backend session)` | 否 | 后端实际公布的命令/skill，`((NAME . DESCRIPTION) …)` |
-| `agent-dash-backend-command (backend session text mode)` | 否 | 默认沿正常发送协议执行；Pi `/compact` 转对应 RPC，DSH 区分 Host 命令与注册 skill |
+| `agent-dash-backend-command (backend session text mode)` | 否 | 默认沿正常发送协议执行；Pi 内置命令转 RPC/认证控制通道或明确拒绝，DSH 区分 Host 命令与注册 skill |
 
 ## 4. 通用 holder（D1）
 
@@ -206,14 +207,21 @@ DSH 的 `session/follow` 快照提供初始投影；同一 websocket 同时订�
 - 五个后端共用同一套 UI 布局与交互，不按后端复制界面。用户回合的正文以 highlight face 全宽高亮，前导分隔空行不带高亮 face；底部 `You>` 通过 overlay 装饰输入区，不进入发送内容或历史。输入 face 与 emacs-pi 一致：继承 widget-field 背景、明确 `:underline nil`、`:extend t`，不硬编码主题颜色。输入 overlay 的 after-string 用 display-only stretch space 填充到窗口右边缘，保证空草稿和末行也铺满背景；填充不进入草稿、发送内容或历史。填充首字符必须带 `cursor t`，将光标锚定在提示符/草稿后，而非虚拟提示符开头或窗口右边缘。header-line 置顶最近一条用户消息。
 - 工具、纯 thinking 消息与 Pi 带 toolCall 的中间消息按用户回合收进默认折叠的 `Process · N steps`。标题 `RET`/`TAB` 控制整组，展开后仍可单独折叠工具输出；最终答复不隐藏。有正文的最终消息，其 thinking 仍单独折叠。
 - tab-line 左对齐显示已知统计，右边缘对齐显示 `(provider) 模型 · 思考等级`，并在后端提供时追加 Agent 预设、权限模式，对齐锚点与 emacs-pi 一致。窄窗口先去掉低优先级统计，再去掉 provider，必要时截断；完整信息保留在 help-echo。Pi 统计含 context、token、prompt/call 数、缓存读取比例和预估费用（非账单）；其他后端缺失的数据不虚构。实际 RPC `get_session_stats` 的 `contextUsage` 提供上下文；附着后和 `agent_settled` 时刷新，重绘不请求数据。
-- 五后端共用精简 mode-line：`Pi thinking |` / `Claude idle` / `DSH waiting ?1` 等。活动指示器与 emacs-pi 一样放在普通 `mode-line-misc-info` 区，不占 `mode-line-process`、不重复模型信息。运行中每 150ms 轮换 `|/-\`，只重绘状态、不请求后端、不改草稿；空闲、断开、关闭 buffer 或切换 major mode 时清理 timer。非空队列显示 `[S1 F2]`、待处理请求显示 `?N`，具体阶段（如 `waiting for model` / `responding`）与操作键放在 tooltip。重复热载不会增加 indicator 或 timer；`agent-dash-refresh-chat` 可无损重建显示，保留连接、草稿和输入区光标位置。不宣称与旧客户端完全等价：图片粘贴、队列编辑等仍待迁移。
+- 五后端共用精简 mode-line：`Pi thinking |` / `Claude idle` / `DSH waiting ?1` 等。活动指示器与 emacs-pi 一样放在普通 `mode-line-misc-info` 区，不占 `mode-line-process`、不重复模型信息。运行中每 150ms 轮换 `|/-\`，只重绘状态、不请求后端、不改草稿；空闲、断开、关闭 buffer 或切换 major mode 时清理 timer。非空队列显示 `[S1 F2]`、待处理请求显示 `?N`，具体阶段（如 `waiting for model` / `responding`）与操作键放在 tooltip。重复热载不会增加 indicator 或 timer；`agent-dash-refresh-chat` 可无损重建显示，保留连接、草稿和输入区光标位置。不宣称与旧客户端完全等价：队列编辑等仍待迁移。
 - 草稿与历史分开存放：后台输出不能修改输入区。
+- `agent-dash-images.el` 统一附件与缩略图，规范为 `(:data BASE64 :mime-type MIME :name NAME)`。输入区的待发送缩略图在 overlay before-string 中，不进入草稿/历史；删除、后台输出和重绘保持草稿与光标。本地签名/大小校验限定 PNG/JPEG/GIF/WebP，不执行 SVG、不自动下载远程图片。终端或无法解码时保留可操作占位文本，原图通过 Emacs image-mode 查看。
+- 五后端分别编码为 Pi image/mimeType、Claude base64 source、Codex image data URL、DSH image/mediaType、Hermes ACP image/mimeType；Hermes 声明不支持时拒绝附件。DSH 历史附件在接收协议数据时经 Host session/attachment 读取并按会话缓存，重绘不做 RPC。恢复时归一化用户、助手和工具的图片块，纯图片消息也保留。
+- 图片写入失败保留草稿；可关联的 Pi/Codex/Hermes 请求失败只恢复未被更新提交取代的空草稿，旧响应不能覆盖新输入；迟到的旧失败保留为独立可选草稿。保留失败/最近含图草稿供 C-c C-u 手动恢复，不自动重发；后续模型/工具错误不意味着此前未执行。含附件时拒绝 slash 命令，避免接口不支持附件却静默丢图。
 
 ### 6.1 输入补全
 
 `agent-dash-input.el` 为五后端共用输入层：`TAB` 在 `/`、`@file`、`@session`、`@dash` 后调用标准 `completing-read`，保留 Vertico UI，在 picker 内可选启用 Orderless，不改全局 completion 配置。`@session` 限当前 Agent（跨项目），`@dash` 使用全 Agent Hub 清单，显示/匹配摘要、末句、项目、日期和完整 ID；同名会话不混淆。选中后生成已有 `agent-dash:` 引用格式，发送过滤器负责按原预算展开。目录读取不请求模型。替换范围用 marker 跟踪后台输出，取消或草稿被改动时不覆盖输入。
 
-`/` 合并本地命令与后端真实目录，按名称去重，本地命令优先；`C-u TAB` 刷新目录。客户端 `/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`（及支持时的 `/model`）不发给模型，且不忽略多余参数。Pi 用 `get_commands`，Claude 存 init.slash_commands（热载可从原 holder 日志恢复），DSH 用 commands/list + skills/list，Hermes 存 available_commands_update；Codex 未暴露 CLI 斜杠菜单，不虚构。DSH 只有已验证注册的 skill 会作为 prompt 提交，Host 命令走 commands/execute，失败保留草稿、成功显示返回文本。
+`/` 默认合并本地命令与后端真实目录，按名称去重，本地命令优先；Pi 例外，只显示原生目录；`C-u TAB` 刷新目录。客户端 `/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`（及支持时的 `/model`）不发给模型，且不忽略多余参数。Pi 采用安装版内置目录（优先运行中桥接公布的清单）加 `get_commands`，不向其补全额外插入客户端别名；Claude 存 init.slash_commands（热载可从原 holder 日志恢复），DSH 用 commands/list + skills/list，Hermes 存 available_commands_update；Codex 未暴露 CLI 斜杠菜单，不虚构。DSH 只有已验证注册的 skill 会作为 prompt 提交，Host 命令走 commands/execute，失败保留草稿、成功显示返回文本。
+
+Pi 内置命令不会使用 `prompt` 兜底：可映射的操作走原生 RPC，认证通过 `agent-dash-pi-bridge.mjs` 的私有控制通道处理，其余标记终端 UI 专用并拒绝。控制帧借用无人等待的 `extension_ui_response`，以随机操作 ID 关联；即使桥接不存在，stock RPC 也只忽略，不触发模型。结果通过带前缀的 `ctx.ui.notify` 返回，由客户端解包，避免 SDK 捕获扩展 stdout 或打断其他 RPC 输出。五秒内无接收确认时失败，不重发；收到确认后等待交互结果，退出清理状态。
+
+认证桥接复用当前 Pi 注册表背后的 runtime（包括扩展 provider），不另建凭据存储。`ModelRegistry.runtime` 是版本敏感的内部访问，集中检查所需方法，不支持则安全失败。API-key/OAuth 的所有自由文本认证输入均转换为 secret 请求，Emacs 使用 `read-passwd`；旧 OAuth onPrompt 的普通文本也可能是密钥，不能依赖它的类型标签。输入值只经 UI 应答回传，不进入模型、聊天输入历史或结果通知；后续通知中的已输入值被替换。Native SDK 使用自己的锁和同步流程写凭据；仅在用户实际执行认证命令并完成交互后发生，不在目录查询或热载时登录。旧 holder 不会被自动停止或重建。
 
 ## 7. hub、摘要、搜索（复刻 ashub）
 
@@ -226,4 +234,4 @@ DSH 的 `session/follow` 快照提供初始投影；同一 websocket 同时订�
 
 ## 8. 不做（本版）
 
-TRAMP、Windows、分支树 UI、fork / clone、队列逐条编辑（mode-line 只显示队列计数）、图片附件与智能粘贴（接口已留 `images` 参数）、DSH 模型切换。
+TRAMP、Windows、分支树 UI、fork / clone、队列逐条编辑（mode-line 只显示队列计数）、DSH 模型切换。

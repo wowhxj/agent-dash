@@ -11,6 +11,7 @@
 
 (require 'agent-dash-core)
 (require 'agent-dash-input)
+(require 'agent-dash-images)
 (require 'markdown-mode)
 
 (defgroup agent-dash-ui nil "Chat buffer of `agent-dash'." :group (quote agent-dash))
@@ -33,6 +34,19 @@
   "Face for tool and thinking lines.")
 (defface agent-dash-separator-face '((t :inherit shadow))
   "Face for the line above the composer.")
+
+(defcustom agent-dash-auto-answer t
+  "Open pending agent dialogs in the minibuffer for the selected chat.
+Other chats keep their requests visible until selected or answered with
+`agent-dash-answer'.  Never interrupt an existing minibuffer interaction."
+  :type 'boolean
+  :group 'agent-dash)
+
+(defvar agent-dash--answering nil
+  "Non-nil while an agent dialog owns the minibuffer.")
+
+(defvar-local agent-dash--answer-timer nil
+  "Deferred minibuffer dialog timer for this chat.")
 
 (defvar-local agent-dash--session nil "Session shown in this chat buffer.")
 (defvar-local agent-dash--transcript-end nil
@@ -95,7 +109,8 @@ The prompt history keeps the text as typed.")
                           (if cut (substring text 0 cut) text))
                         (if (plist-get item :images)
                             (format " [%d image(s)]" (length (plist-get item :images)))
-                          "") "\n")
+                          "") "\n"
+                        (agent-dash-images-string (plist-get item :images)))
                 'face 'agent-dash-user-face)))
       ('assistant
        (let ((thinking (plist-get item :thinking))
@@ -109,7 +124,8 @@ The prompt history keeps the text as typed.")
           ;; A message of thinking alone shows no empty label.
           (unless (and (string-empty-p text) thinking (not (string-blank-p thinking)))
             (concat (agent-dash--label session)
-                    (if (plist-get item :final) (agent-dash--markdown text) text))))))
+                    (if (plist-get item :final) (agent-dash--markdown text) text)))
+          (agent-dash-images-string (plist-get item :images)))))
       ('tool
        (let* ((status (plist-get item :status))
               (head (format "%s %s  %s"
@@ -117,18 +133,21 @@ The prompt history keeps the text as typed.")
                             (plist-get item :name)
                             (agent-dash--one-line (plist-get item :args) 70)))
               (output (plist-get item :output)))
-         (propertize
-          (if (or folded (not output))
-              head
-            (let ((lines (split-string output "\n")))
-              (concat head "\n"
-                      (mapconcat (lambda (l) (concat "    " l))
-                                 (seq-take lines agent-dash-tool-output-lines)
-                                 "\n")
-                      (when (> (length lines) agent-dash-tool-output-lines)
-                        (format "\n    … %d more lines"
-                                (- (length lines) agent-dash-tool-output-lines))))))
-          'face (if (eq status 'error) 'error 'agent-dash-process-face))))
+         (concat
+          (propertize
+           (if (or folded (not output))
+               head
+             (let ((lines (split-string output "\n")))
+               (concat head "\n"
+                       (mapconcat (lambda (l) (concat "    " l))
+                                  (seq-take lines agent-dash-tool-output-lines)
+                                  "\n")
+                       (when (> (length lines) agent-dash-tool-output-lines)
+                         (format "\n    … %d more lines"
+                                 (- (length lines) agent-dash-tool-output-lines))))))
+           'face (if (eq status 'error) 'error 'agent-dash-process-face))
+          (unless folded (agent-dash-images-string (plist-get item :images))))))
+      ('request (agent-dash--request-text item))
       ('notice
        (propertize (format "[%s]" (plist-get item :text))
                    'face (pcase (plist-get item :level)
@@ -139,7 +158,8 @@ The prompt history keeps the text as typed.")
   (or (eq (plist-get item :type) 'tool)
       (and (eq (plist-get item :type) 'assistant)
            (or (plist-get item :process)
-               (and (string-blank-p (or (plist-get item :text) ""))
+               (and (not (plist-get item :images))
+                    (string-blank-p (or (plist-get item :text) ""))
                     (not (string-blank-p
                           (or (plist-get item :thinking) ""))))))))
 
@@ -211,7 +231,8 @@ The prompt history keeps the text as typed.")
 (defun agent-dash--on-update (session item)
   "Show SESSION's change of ITEM in its buffer."
   (let ((buffer (agent-dash-session-buffer session)))
-    (when (buffer-live-p buffer)
+    (when (and (buffer-live-p buffer)
+               (buffer-local-value 'agent-dash--transcript-end buffer))
       (with-current-buffer buffer
         (when item
           (unless (agent-dash--process-p item)
@@ -219,6 +240,7 @@ The prompt history keeps the text as typed.")
             (agent-dash--render session item))
           (agent-dash--render-process session item))
         (agent-dash--sync-spinner)
+        (agent-dash--schedule-answer)
         (force-mode-line-update)))))
 
 (add-hook 'agent-dash-update-functions #'agent-dash--on-update)
@@ -425,6 +447,14 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (define-key map (kbd "i") #'agent-dash-insert-or-focus)
     (define-key map (kbd "<S-return>") #'newline)
     (define-key map (kbd "TAB") #'agent-dash-tab)
+    (define-key map [remap yank] #'agent-dash-paste)
+    (define-key map [remap clipboard-yank] #'agent-dash-paste)
+    (define-key map (kbd "s-v") #'agent-dash-paste)
+    (define-key map (kbd "C-c C-v") #'agent-dash-paste-image)
+    (define-key map (kbd "C-c C-f") #'agent-dash-attach-image)
+    (define-key map (kbd "C-c C-d") #'agent-dash-remove-image)
+    (define-key map (kbd "C-c C-o") #'agent-dash-open-image)
+    (define-key map (kbd "C-c C-u") #'agent-dash-restore-image-draft)
     (define-key map (kbd "M-p") #'agent-dash-previous-prompt)
     (define-key map (kbd "M-n") #'agent-dash-next-prompt)
     (define-key map (kbd "C-c C-c") #'agent-dash-send)
@@ -450,6 +480,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (setq-local word-wrap t)
   (add-hook 'completion-at-point-functions #'agent-dash--file-capf nil t)
   (add-hook 'kill-buffer-hook #'agent-dash--on-kill nil t)
+  (add-hook 'post-command-hook #'agent-dash--schedule-answer nil t)
+  (add-hook 'change-major-mode-hook #'agent-dash--stop-answer-timer nil t)
   (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t))
 
 (defun agent-dash--file-capf ()
@@ -486,7 +518,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
         (make-overlay agent-dash--input-start (point-max) nil nil t))
   (overlay-put agent-dash--input-overlay 'face 'agent-dash-input-face)
   (overlay-put agent-dash--input-overlay 'before-string
-               (propertize "You> " 'face 'agent-dash-input-face))
+               (concat (agent-dash-image-attachments-string)
+                       (propertize "You> " 'face 'agent-dash-input-face)))
   ;; Empty composers have a zero-length overlay: :extend alone cannot
   ;; paint the area after the virtual prompt.  Fill to the window edge
   ;; with display-only space, never padding the draft with real text.
@@ -535,6 +568,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
 (defun agent-dash--on-kill ()
   "Detach from the agent when its chat buffer dies."
   (agent-dash--stop-spinner)
+  (agent-dash--stop-answer-timer)
   (when-let* ((s agent-dash--session))
     (setq agent-dash--sessions (delq s agent-dash--sessions))
     (unless agent-dash--quitting
@@ -568,22 +602,40 @@ Return the session."
 
 (defun agent-dash--submit (mode)
   "Send the composer text with MODE, or with prompt/follow-up when MODE is nil."
-  (let ((text (string-trim (agent-dash--input)))
-        (s agent-dash--session))
-    (when (string-empty-p text) (user-error "Nothing to send"))
+  (let* ((text (string-trim (agent-dash--input)))
+         (images agent-dash--attachments)
+         (s agent-dash--session)
+         (auth (and (eq (agent-dash-session-backend s) 'pi)
+                    (string-match-p "\\`/\\(?:login\\|logout\\)\\(?:[[:space:]]\\|\\'\\)" text))))
+    (when (and (string-empty-p text) (not images)) (user-error "Nothing to send"))
+    (when (and images (string-prefix-p "/" text))
+      (user-error "Remove images before running slash commands"))
+    (when images
+      (agent-dash-image--check-chat)
+      (mapc #'agent-dash-image-bytes images))
     (unless (agent-dash-input-dispatch text)
       (setq mode (or mode (if (eq (agent-dash-session-state s) 'running)
                               'follow-up 'prompt)))
+      (when images
+        (setq agent-dash--last-image-draft (list :text (agent-dash--input) :images images)))
+      (agent-dash-set-data s :image-draft-token (and images agent-dash--last-image-draft))
+      (agent-dash-set-data s :image-send-error nil)
       ;; Clear only after the backend accepted the write; errors keep the draft.
-      (let ((sent (seq-reduce (lambda (acc f) (funcall f acc))
-                              agent-dash-prompt-filter-functions text))
+      (let ((sent (if auth text
+                    (seq-reduce (lambda (acc f) (funcall f acc))
+                                agent-dash-prompt-filter-functions text)))
             (backend (agent-dash-session-backend s)))
         (if (string-prefix-p "/" text)
             (agent-dash-backend-command backend s sent mode)
-          (agent-dash-backend-send backend s sent nil mode)))
-      (push text agent-dash--history)
+          (agent-dash-backend-send backend s sent images mode)))
+      (when (and images (eq (agent-dash-data s :image-send-error)
+                            agent-dash--last-image-draft))
+        (user-error "Image submission rejected; draft kept"))
+      (unless auth (push text agent-dash--history))
       (setq agent-dash--history-index -1 agent-dash--history-draft nil)
-      (agent-dash--set-input ""))))
+      (setq agent-dash--attachments nil)
+      (agent-dash--set-input "")
+      (agent-dash--decorate-input))))
 
 (defun agent-dash-send ()
   "Send the draft; while the agent runs it queues as a follow-up."
@@ -602,7 +654,10 @@ Return the session."
 (defun agent-dash-ret ()
   "Send from the composer; toggle the item at point elsewhere."
   (interactive)
-  (if (agent-dash--in-input-p) (agent-dash-send) (agent-dash-toggle)))
+  (cond
+   ((agent-dash-session-requests agent-dash--session) (agent-dash-answer))
+   ((agent-dash--in-input-p) (agent-dash-send))
+   (t (agent-dash-toggle))))
 
 (defun agent-dash-tab ()
   "Toggle the item at point, or complete in the composer."
@@ -736,13 +791,71 @@ Return the session."
       (setq agent-dash--quitting t)
       (kill-buffer))))
 
+(defun agent-dash--request-text (request)
+  "Render REQUEST visibly, independently of folded process output."
+  (concat
+   (propertize (format "Question [%s]" (plist-get request :status))
+               'face 'agent-dash-assistant-face)
+   (if (eq (plist-get request :status) 'pending)
+       " — RET / C-c C-a to answer; C-g to cancel\n"
+     "\n")
+   (or (plist-get request :title) "Agent asks") "\n"
+   (when-let* ((message (plist-get request :message))) (concat message "\n"))
+   (when-let* ((placeholder (plist-get request :placeholder)))
+     (concat "Hint: " placeholder "\n"))
+   (mapconcat (lambda (option) (concat "  • " option "\n"))
+              (plist-get request :options) "")
+   (mapconcat (lambda (question)
+                (concat (plist-get question :question) "\n"
+                        (mapconcat (lambda (option) (concat "  • " option "\n"))
+                                   (plist-get question :options) "")))
+              (plist-get request :questions) "")))
+
+(defun agent-dash--stop-answer-timer ()
+  "Stop this chat's deferred dialog timer."
+  (when (timerp agent-dash--answer-timer)
+    (cancel-timer agent-dash--answer-timer))
+  (setq agent-dash--answer-timer nil))
+
+(defun agent-dash--schedule-answer ()
+  "Defer dialogs until outside process filters, only for the selected chat."
+  (when (and agent-dash-auto-answer (not noninteractive)
+             agent-dash--session (not agent-dash--answer-timer)
+             (not agent-dash--answering)
+             (agent-dash-session-requests agent-dash--session)
+             (eq (window-buffer (selected-window)) (current-buffer)))
+    (setq agent-dash--answer-timer
+          (run-at-time 0.1 nil #'agent-dash--maybe-answer (current-buffer)))))
+
+(defun agent-dash--maybe-answer (buffer)
+  "Answer BUFFER's pending dialogs without nesting an existing minibuffer."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq agent-dash--answer-timer nil)
+      (when (and agent-dash-auto-answer agent-dash--session
+                 (not agent-dash--answering)
+                 (agent-dash-session-requests agent-dash--session)
+                 (eq (window-buffer (selected-window)) buffer))
+        (if (active-minibuffer-window)
+            (agent-dash--schedule-answer)
+          (condition-case err
+              (agent-dash-answer)
+            (error (message "Agent dialog failed; C-c C-a to retry: %s"
+                            (error-message-string err)))))))))
+
 (defun agent-dash--ask (request)
-  "Ask the user REQUEST; return the answer."
-  (let ((title (format "%s " (plist-get request :title))))
+  "Ask the user REQUEST; return the answer.  Quitting cancels the whole request."
+  (let ((title (concat (or (plist-get request :title) "Agent asks")
+                       (when-let* ((message (plist-get request :message)))
+                         (concat "\n" message))
+                       (when-let* ((hint (plist-get request :placeholder)))
+                         (format " (%s)" hint))
+                       " ")))
     (pcase (plist-get request :kind)
       ('confirm (y-or-n-p title))
       ('select (completing-read title (plist-get request :options) nil t))
       ('input (read-string title (plist-get request :default)))
+      ('secret (read-passwd title))
       ('permission
        (pcase (car (read-multiple-choice
                     title '((?y "yes" "Allow") (?n "no" "Deny"))))
@@ -752,21 +865,31 @@ Return the session."
                  (let ((prompt (concat (plist-get q :question) " ")))
                    ;; A multi-select answer is a list of strings.
                    (if (plist-get q :multi)
-                       (completing-read-multiple prompt (plist-get q :options))
-                     (completing-read prompt (plist-get q :options)))))
+                       (completing-read-multiple prompt (plist-get q :options) nil
+                                                 (eq (plist-get q :freeform) :false))
+                     (completing-read prompt (plist-get q :options) nil
+                                      (eq (plist-get q :freeform) :false)))))
                (plist-get request :questions)))
       (kind (error "Unknown request kind %S" kind)))))
 
 (defun agent-dash-answer ()
-  "Answer the agent's pending questions and permission requests."
+  "Answer pending dialogs.  Keyboard quit cancels rather than leaving one hung."
   (interactive)
-  (let ((s agent-dash--session))
+  (when agent-dash--answering (user-error "An agent dialog is already open"))
+  (let ((s agent-dash--session)
+        (agent-dash--answering t)
+        cancelled)
+    (agent-dash--stop-answer-timer)
     (unless (agent-dash-session-requests s) (user-error "No pending requests"))
-    (while (agent-dash-session-requests s)
+    (while (and (not cancelled) (agent-dash-session-requests s))
       (let* ((request (car (agent-dash-session-requests s)))
-             (answer (agent-dash--ask request)))
-        (agent-dash-backend-respond (agent-dash-session-backend s) s request answer)
-        (agent-dash-emit s (list :type 'request-done :id (plist-get request :id)))))))
+             (answer (condition-case nil (agent-dash--ask request)
+                       (quit (setq cancelled t) :cancelled))))
+        ;; Timers/process filters can withdraw a dialog while the user reads it.
+        (when (memq request (agent-dash-session-requests s))
+          (agent-dash-backend-respond (agent-dash-session-backend s) s request answer)
+          (agent-dash-emit s (list :type 'request-done :id (plist-get request :id)
+                                   :status (if cancelled 'cancelled 'answered))))))))
 
 (provide 'agent-dash-ui)
 ;;; agent-dash-ui.el ends here

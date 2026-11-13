@@ -87,8 +87,9 @@
                    '((:type request :id "x1" :kind select :title "Pick"
                             :options ("A" "B") :default nil))))
     (should (equal (plist-get (agent-dash-session-meta s) :status) "busy"))
-    (should (equal (mapcar (lambda (i) (plist-get i :text)) (agent-dash-session-items s))
-                   '("hey")))))
+    (should (equal (mapcar (lambda (i) (plist-get i :type)) (agent-dash-session-items s))
+                   '(request notice)))
+    (should (equal (plist-get (cadr (agent-dash-session-items s)) :text) "hey"))))
 
 (ert-deftest agent-dash-pi-test-holder-end-to-end ()
   (agent-dash-test-with-holders

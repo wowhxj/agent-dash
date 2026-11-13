@@ -183,12 +183,22 @@ find an early match without reading small files twice."
                                  (agent-dash-session-requests session)
                                  :key (lambda (r) (plist-get r :id))
                                  :test #'equal)
-                      (list event))))
+                      (list event)))
+        ;; Keep dialogs outside folded tool output, with a separate ID space.
+        (let ((dialog (copy-sequence event)))
+          (setq dialog (plist-put dialog :id (cons 'request (plist-get event :id)))
+                dialog (plist-put dialog :status 'pending)
+                item (agent-dash--upsert session dialog))))
       ('request-done
        (setf (agent-dash-session-requests session)
              (cl-remove (plist-get event :id)
                         (agent-dash-session-requests session)
-                        :key (lambda (r) (plist-get r :id)) :test #'equal)))
+                        :key (lambda (r) (plist-get r :id)) :test #'equal))
+       (when-let* ((dialog (agent-dash-item session (cons 'request (plist-get event :id))))
+                   (pending (eq (plist-get dialog :status) 'pending)))
+         (setq item (agent-dash--upsert
+                     session (list :id (plist-get dialog :id) :type 'request
+                                   :status (or (plist-get event :status) 'answered))))))
       (type (error "Unknown agent-dash event type: %S" type)))
     (run-hook-with-args 'agent-dash-update-functions session item)
     item))
@@ -216,7 +226,8 @@ MODE is `prompt', `follow-up' or `steer'.")
   "Disconnect this Emacs from SESSION on BACKEND; the agent keeps running.")
 
 (cl-defgeneric agent-dash-backend-respond (backend session request answer)
-  "Answer REQUEST event of SESSION on BACKEND with ANSWER."
+  "Answer REQUEST event of SESSION on BACKEND with ANSWER.
+ANSWER is `:cancelled' on keyboard quit; never treat it as approval."
   (ignore session request answer)
   (user-error "Backend %s cannot answer requests" backend))
 

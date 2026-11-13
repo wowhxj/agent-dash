@@ -97,7 +97,8 @@ Orderless, when installed, is enabled only for this picker."
                   files))))
 
 (defun agent-dash-input--commands (session &optional refresh)
-  "Merge client commands with SESSION's advertised commands; REFRESH reloads."
+  "Return SESSION's completion catalog; REFRESH reloads backend commands.
+Pi uses its native catalog without adding client-only slash names."
   (let* ((backend (agent-dash-session-backend session))
          (local '(("help" . "Show available commands")
                   ("new" . "New session with this agent in this project")
@@ -120,7 +121,8 @@ Orderless, when installed, is enabled only for this picker."
              (unless (gethash (car entry) seen)
                (puthash (car entry) t seen)
                entry))
-           (append local (agent-dash-data session :command-catalog))))))
+           (append (unless (eq backend 'pi) local)
+                   (agent-dash-data session :command-catalog))))))
 
 (defun agent-dash-complete-input (&optional refresh)
   "Complete /, @file, @session or @dash through the minibuffer.
@@ -191,7 +193,8 @@ Native commands return nil and are dispatched through the backend protocol."
            (origin (current-buffer))
            (draft (agent-dash--input)))
       (when (or (member command '("help" "new" "resume" "dash" "stop" "quit"))
-                (and (equal command "model") (agent-dash-capability session :models)))
+                (and (equal command "model") (agent-dash-capability session :models)
+                     (not (and (eq backend 'pi) (not (string-empty-p args))))))
         (unless (string-empty-p args)
           (user-error "/%s does not accept arguments; use its picker" command))
         (pcase command

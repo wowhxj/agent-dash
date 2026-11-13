@@ -39,12 +39,12 @@ This is not yet full interaction parity with emacs-pi/emacs-claude: clipboard im
 
 | Key | Action |
 |---|---|
-| `RET` / `C-c C-c` | Send; while the agent runs, queue as a follow-up |
+| `RET` / `C-c C-c` | Send; while the agent runs, queue as a follow-up (`RET` answers pending dialogs first) |
 | `S-RET` | Newline |
 | `C-c C-s` | Steer the running task |
 | `C-c C-k` | Stop the current task |
 | `C-c C-q` | Quit (see the table above) |
-| `C-c C-a` | Answer permission requests and questions (mode line shows `?N`) |
+| `C-c C-a` | Manually open pending permission requests and questions (also opened automatically) |
 | `C-c C-r` | Resume a saved session |
 | `C-c C-b` | Switch to another chat |
 | `C-c @` | Pick a cross-agent session reference |
@@ -55,6 +55,15 @@ This is not yet full interaction parity with emacs-pi/emacs-claude: clipboard im
 | `TAB` / `RET` on a tool or thinking line | Fold / unfold |
 | `M-x agent-dash-select-model` | Switch model |
 
+### Questions and confirmations
+
+Requests in the selected chat open automatically in the minibuffer, outside process filters. Other chats keep a visible question card and `?N` indicator until selected; an existing minibuffer is never interrupted. Drafts stay intact. Set `agent-dash-auto-answer` to `nil` for manual-only interaction with `RET` or `C-c C-a`.
+
+- Single choice uses completion; freeform prompts accept custom text.
+- Native multi-choice questions use comma-separated completion. Pi’s `ask_user` RPC fallback presents repeated toggle choices; select **Done** to finish, or **Other** for custom input. Batched questions and optional comments continue as successive dialogs.
+- `C-g` cancels the current request and tells the backend, never granting permission. Pi receives an explicit cancellation, Claude denies the tool call, Codex/DSH return no question answers, and Hermes cancels its permission request.
+- Confirmation bodies and input hints remain visible; editor requests use their prefilled text (quoted newlines, `C-q C-j`, work in the minibuffer). Pi timeouts/withdrawals clear pending state; a late answer is not sent.
+
 ### Input completion
 
 - `/` + `TAB`: shared client commands (`/help`, `/new`, `/resume`, `/dash`, `/stop`, `/quit`, plus `/model` where supported) and the backend's advertised commands/skills. Select a command, then `RET` to execute it. Client commands take no arguments and open their picker when applicable.
@@ -62,7 +71,25 @@ This is not yet full interaction parity with emacs-pi/emacs-claude: clipboard im
 - `@session` + `TAB`: saved sessions of the current agent, across projects.
 - `@dash` + `TAB`: sessions of all agents from the shared Hub inventory. Match agent, project, summary, latest prompt or id; selected references attach the saved conversation when sent.
 
-Pickers use `completing-read`: existing Vertico is respected and optional Orderless is enabled locally without changing global settings. `C-g` preserves the draft; background output cannot shift the replacement region. Completion reads catalogs, not models. Pi commands use `get_commands` (and RPC for `/compact`); Claude uses its initialization catalog; DSH uses Host commands and registered skills; Hermes uses ACP-advertised commands. Codex currently offers the shared client commands, not an emulation of its CLI-only slash menu. DSH Host command results are displayed; registered skills are submitted as prompts.
+Pickers use `completing-read`: existing Vertico is respected and optional Orderless is enabled locally without changing global settings. `C-g` preserves the draft; background output cannot shift the replacement region. Completion reads catalogs, not models. Pi merges its installed native catalog with `get_commands` (see below); Claude uses its initialization catalog; DSH uses Host commands and registered skills; Hermes uses ACP-advertised commands. Codex currently offers the shared client commands, not an emulation of its CLI-only slash menu. DSH Host command results are displayed; registered skills are submitted as prompts.
+
+### Pi native commands
+
+Pi completion uses its own built-in commands (24 in the currently verified version), plus RPC-advertised extensions, prompt templates and skills. It does not add client-only names to this list; `/help`, `/dash` and `/stop` remain available as manual client aliases. `/model provider/model-id` and `/thinking` use native RPC, as do `/compact`, `/name`, `/session`, `/copy` and HTML `/export`.
+
+`/login [provider-id]` and `/logout [provider-id]` use the running Pi runtime, including extension providers. Install/keep `agent-dash-pi-bridge.mjs` alongside the Elisp files. Login can select a provider and authentication method; all free-form authentication input is masked with `read-passwd` (including legacy OAuth API-key prompts and endpoint fields). Never put API keys after `/login`: authentication commands do not enter prompt history or model context. `C-g` cancels a dialog; errors do not automatically retry. Authorization URLs are displayed, not automatically opened, and the clipboard is not replaced.
+
+**Existing Pi holders must be stopped with `/quit` and restored from the Hub to load the bridge; closing the chat buffer alone reuses the old process.** The client will not restart a running task for you. Missing bridges and unknown commands fail closed, never falling back to inference. TUI-only commands such as `/settings`, `/tree`, `/fork`, `/clone`, `/trust`, `/share` and `/reload` are shown with a terminal-UI annotation and explicitly refused; a matching catalog is not a claim that the full terminal UI is implemented. `/hotkeys` shows the current Emacs bindings.
+
+### Images
+
+All five backends support image attachments through their native protocols. Use `C-y` or macOS `s-v` to paste an image (ordinary text still yanks normally), `C-c C-v` for image-only paste, or `C-c C-f` to choose a local file. macOS image paste uses optional `pngpaste`; Linux uses `wl-paste` or `xclip`. No clipboard helper is needed for file attachment.
+
+Pending thumbnails appear above `You>` without entering the draft text. Click `× remove` or use `C-c C-d` to remove an attachment; click an image or use `C-c C-o` to view it at full size in Emacs. Image-only prompts are allowed. Remove attachments before executing slash commands.
+
+PNG, JPEG, GIF and WebP are recognized by content, with a 10 MiB per-image client limit and at most 10 attachments (providers may impose smaller limits). Synchronous write failures keep the draft. Correlated Pi/Codex/Hermes request rejections can restore an empty draft if no newer submission is active; `C-c C-u` chooses from failed/recent image drafts without overwriting newer input or automatically resending anything. A model-side error can occur after work has already started: check before retrying.
+
+Saved user/assistant image blocks render on replay; tool images appear when their details are expanded. Unsupported, missing or oversized images retain an accessible placeholder. Remote image URLs are never downloaded automatically, untrusted local image paths require confirmation, SVG is not rendered, and image bytes are not added to textual session references or summaries. Reopen an older chat from the Hub to replay image blocks that an earlier client version had ignored.
 
 ### Hub
 

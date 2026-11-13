@@ -39,12 +39,12 @@
 
 | 键 | 作用 |
 |---|---|
-| `RET` / `C-c C-c` | 发送；Agent 运行中发送则排队为 follow-up |
+| `RET` / `C-c C-c` | 发送；运行中排队为 follow-up（`RET` 优先回答待处理提问） |
 | `S-RET` | 换行 |
 | `C-c C-s` | steer（引导正在运行的任务） |
 | `C-c C-k` | 停止当前任务 |
 | `C-c C-q` | 退出（语义见上表） |
-| `C-c C-a` | 回答 Agent 的权限请求或提问（mode-line 显示 `?N`） |
+| `C-c C-a` | 手动打开待处理的权限请求或提问（默认也会自动弹出） |
 | `C-c C-r` | 恢复历史会话 |
 | `C-c C-b` | 切换到其他聊天 |
 | `C-c @` | 打开跨 Agent 会话引用选择器 |
@@ -55,6 +55,15 @@
 | `TAB` / `RET`（在工具或 thinking 行上） | 折叠 / 展开 |
 | `M-x agent-dash-select-model` | 切换模型 |
 
+### 选择与确认
+
+当前选中的聊天收到提问时，会自动在 minibuffer 中交互，不在进程过滤器内阻塞。后台聊天保留可见的问题卡片和 `?N` 提示，切回后再弹出；已有 minibuffer 操作不会被抢占，草稿也不会丢。设置 `(setq agent-dash-auto-answer nil)` 可改为只通过 `RET` 或 `C-c C-a` 手动回答。
+
+- **单选**：补全选择；自由输入问题可填写自定义文本。
+- **多选**：原生多选问题使用逗号分隔补全；Pi 的 `ask_user` RPC 降级交互会逐次展示勾选项，选 **Done** 完成，选 **Other** 自定义输入。批量问题和可选补充说明也会依次弹出。
+- **取消**：在交互中按 `C-g`，向后端返回取消，绝不视为授权。Pi 收到明确取消，Claude 拒绝工具调用，Codex/DSH 返回空问题答案，Hermes 取消权限请求。
+- 确认正文、输入提示和编辑器预填文本会保留；minibuffer 中可用 `C-q C-j` 插入换行。Pi 请求超时或撤回会清理待处理状态，不发送过期答案。
+
 ### 输入补全
 
 - `/` + `TAB`：共用客户端命令（`/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`，支持时还有 `/model`）加后端实际公布的命令/skill。选中后按 `RET` 执行；客户端命令不接收参数，需要选择时打开对应 picker。
@@ -62,7 +71,25 @@
 - `@session` + `TAB`：当前 Agent 的历史会话，跨项目。
 - `@dash` + `TAB`：Hub 中全部 Agent 的会话，可按 Agent、项目、摘要、末句和 ID 多词筛选。发送时沿用已有引用展开逻辑附上对话。
 
-选择器统一走 `completing-read`，沿用当前 Vertico，安装了 Orderless 时仅在 picker 内启用，不修改全局设置。`C-g` 保留草稿；后台输出不会导致替换位置偏移。补全只读目录，不调用模型。Pi 读取 `get_commands`（`/compact` 使用对应 RPC）；Claude 读取初始化目录；DSH 读取 Host 命令与注册 skill；Hermes 使用 ACP 公布的命令。Codex 目前提供共用客户端命令，不冒充其 CLI 专有斜杠菜单。DSH Host 命令会展示执行结果，已验证注册的 skill 则作为 prompt 提交。
+选择器统一走 `completing-read`，沿用当前 Vertico，安装了 Orderless 时仅在 picker 内启用，不修改全局设置。`C-g` 保留草稿；后台输出不会导致替换位置偏移。补全只读目录，不调用模型。Pi 合并本机内置目录与 `get_commands`（见下节）；Claude 读取初始化目录；DSH 读取 Host 命令与注册 skill；Hermes 使用 ACP 公布的命令。Codex 目前提供共用客户端命令，不冒充其 CLI 专有斜杠菜单。DSH Host 命令会展示执行结果，已验证注册的 skill 则作为 prompt 提交。
+
+### Pi 原生命令
+
+Pi 补全采用自身的内置命令（当前验证版本共 24 个）加 RPC 公布的扩展、提示模板与 skills，不混入额外客户端命令名；`/help`、`/dash`、`/stop` 仍可手动输入。`/model provider/model-id`、`/thinking`、`/compact`、`/name`、`/session`、`/copy` 和 HTML `/export` 使用原生 RPC。
+
+`/login [provider-id]`、`/logout [provider-id]` 通过正在运行的 Pi runtime 处理，包含扩展注册的 provider。安装时须将 `agent-dash-pi-bridge.mjs` 与 Elisp 文件一并保留。可选择 provider 和认证方式；所有认证自由文本输入都走 `read-passwd` 遮罩，包括旧 OAuth 接口的 API-key 提示和地址字段。不要在 `/login` 后附加密钥；认证命令不进入输入历史或模型上下文。`C-g` 取消对话，失败不自动重试；授权链接仅显示，不自动打开浏览器或覆盖剪贴板。
+
+**旧 Pi 后台进程需先 `/quit` 停止，再从 Hub 恢复以加载桥接；仅关闭聊天 buffer 会复用旧进程。** 不会自动重启正在执行的任务。桥接缺失、未知命令均明确拒绝，不回退到模型。`/settings`、`/tree`、`/fork`、`/clone`、`/trust`、`/share`、`/reload` 等终端 UI 专用命令会标记并提示限制，不把“目录一致”冒充“完整实现了终端界面”；`/hotkeys` 显示当前 Emacs 键位。
+
+### 图片
+
+五个后端均通过原生协议发送图片。`C-y` 或 macOS `s-v` 粘贴图片（文本仍正常粘贴），`C-c C-v` 仅粘贴图片，`C-c C-f` 选择本地文件。macOS 图片粘贴使用可选的 `pngpaste`，Linux 使用 `wl-paste` 或 `xclip`；选图不依赖剪贴板工具。
+
+待发送缩略图显示在 `You>` 上方，不混入草稿文字。点击 `× remove` 或按 `C-c C-d` 移除附件，点击图片或按 `C-c C-o` 在 Emacs 查看原图。支持只发图片；执行 `/` 命令前需先移除附件。
+
+按文件内容识别 PNG/JPEG/GIF/WebP，单图客户端上限 10 MiB、最多 10 张，另有总量限制；模型可能有更低限制。本地发送失败保留草稿，Pi/Codex/Hermes 可关联的请求拒绝可恢复没有更新提交时的空草稿；`C-c C-u` 可选择恢复失败或最近的含图草稿，不覆盖新输入，也不自动重发。模型报错前可能已经执行了部分操作，重试前请先确认。
+
+恢复历史时显示用户和助手的图片块，工具图片在展开详情后显示。缺失、超限或无法解码的图片保留占位提示；不自动下载远程 URL，不可信本地图片路径需确认，不渲染 SVG，不将图片二进制混入文本会话引用或摘要。旧版本已打开的聊天可从 Hub 重新恢复，以重新解析此前忽略的图片。
 
 ### hub
 

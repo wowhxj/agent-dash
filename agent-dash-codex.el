@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-images)
 (require 'agent-dash-holder)
 
 (defgroup agent-dash-codex nil "Codex backend of `agent-dash'." :group 'agent-dash)
@@ -30,7 +31,7 @@
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql codex)))
   "Codex implementation of `agent-dash-backend-capabilities'."
-  (list :quit 'stop :steer t :images nil :models t))
+  (list :quit 'stop :steer t :images t :models t))
 
 (defun agent-dash-codex--command ()
   "Return the app-server command line."
@@ -60,10 +61,27 @@
       ("userMessage"
        (agent-dash-emit session (list :type 'user :id id
                                       :text (agent-dash-codex--input-text
-                                             (agent-dash-jget item "content")))))
+                                             (agent-dash-jget item "content"))
+                                      :images (agent-dash-images-from-blocks
+                                               (agent-dash-jget item "content") t))))
       ("agentMessage"
        (agent-dash-emit session (list :type 'assistant :id id :final t
                                       :text (or (agent-dash-jget item "text") ""))))
+      ("imageGeneration"
+       (let* ((path (agent-dash-jget item "savedPath"))
+              (result (agent-dash-jget item "result"))
+              (data-url (and (stringp result)
+                             (string-match
+                              "\\`data:\\(image/[^;,]+\\);base64,\\(.*\\)\\'" result)))
+              (data (if data-url (match-string 2 result) result))
+              (mime (if data-url (match-string 1 result) "image/png"))
+              (image (or (and path (not (file-remote-p path))
+                              (file-in-directory-p path (agent-dash-session-root session))
+                              (condition-case nil (agent-dash-image-from-file path) (error nil)))
+                         (list :data data :mime-type mime
+                               :file path :ask-file (and path t) :name "generated image"))))
+         (agent-dash-emit session (list :type 'assistant :id id :text "" :final t
+                                        :images (list image)))))
       ("reasoning"
        (let ((text (string-join (or (agent-dash-jget item "summary")
                                     (agent-dash-jget item "content"))
@@ -89,6 +107,8 @@
                                       :name (format "%s.%s" (agent-dash-jget item "server")
                                                     (agent-dash-jget item "tool"))
                                       :args (format "%s" (or (agent-dash-jget item "arguments") ""))
+                                      :images (agent-dash-images-from-blocks
+                                               (agent-dash-jget item "result" "content"))
                                       :output (or (agent-dash-jget item "error" "message")
                                                   (agent-dash-json-text
                                                    (agent-dash-jget item "result" "content")))
@@ -96,7 +116,7 @@
                                                (agent-dash-jget item "status")))))
       ("contextCompaction"
        (agent-dash-emit session (list :type 'notice :id id :text "earlier context compacted")))
-      ;; ponytail: plans, web searches, images and subagents are not shown.
+      ;; ponytail: plans, web searches and subagents are not shown.
       (_ nil))))
 
 (defun agent-dash-codex--thread (session thread)
@@ -212,25 +232,31 @@ Return (ITEM-ID . WHOLE-TEXT)."
                                      (list :cwd (directory-file-name
                                                  (agent-dash-session-root session)))))))))
 
-(defun agent-dash-codex--report (session)
-  "Return a callback showing a failed request in SESSION."
-  (lambda (_result error)
-    (when error (agent-dash-emit session (list :type 'notice :level 'error :text error)))))
+(defun agent-dash-codex--report (session &optional images)
+  "Return a callback reporting a failed SESSION request, recovering IMAGES when safe."
+  (let ((token (agent-dash-data session :image-draft-token)))
+    (lambda (_result error)
+      (when error
+        (if images (agent-dash-image-send-failed session token error)
+          (agent-dash-emit session (list :type 'notice :level 'error :text error)))))))
 
-(cl-defmethod agent-dash-backend-send ((_ (eql codex)) session text _images mode)
-  "Codex `agent-dash-backend-send' for SESSION, TEXT and MODE."
+(cl-defmethod agent-dash-backend-send ((_ (eql codex)) session text images mode)
+  "Codex `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
   (let ((sid (or (agent-dash-data session :sid) (user-error "Codex has no thread yet")))
-        (input (vector (list :type "text" :text text))))
+        (input (vconcat (unless (string-empty-p text) (list (list :type "text" :text text)))
+                        (mapcar (lambda (image) (list :type "image"
+                                                      :url (agent-dash-image-data-url image)))
+                                images))))
     (if (eq mode 'steer)
         (agent-dash-holder-request session "turn/steer"
                                    (list :threadId sid :input input
                                          :expectedTurnId (agent-dash-data session :turn))
-                                   (agent-dash-codex--report session))
+                                   (agent-dash-codex--report session images))
       (agent-dash-holder-request session "turn/start"
                                  (append (list :threadId sid :input input)
                                          (when-let* ((model (agent-dash-data session :model)))
                                            (list :model model)))
-                                 (agent-dash-codex--report session)))))
+                                 (agent-dash-codex--report session images)))))
 
 (cl-defmethod agent-dash-backend-cancel ((_ (eql codex)) session)
   "Codex `agent-dash-backend-cancel' for SESSION."
@@ -256,7 +282,7 @@ Return (ITEM-ID . WHOLE-TEXT)."
          (list :decision (if (eq answer 'allow) "accept" "decline"))
        (let ((answers (make-hash-table :test #'equal)))
          (cl-loop for q in (cdr (assoc id (agent-dash-data session :questions)))
-                  for a in answer
+                  for a in (unless (eq answer :cancelled) answer)
                   do (puthash (agent-dash-jget q "id")
                               (list :answers (vconcat (if (listp a) a (list a))))
                               answers))

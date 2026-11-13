@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-images)
 (require 'agent-dash-holder)
 
 (defgroup agent-dash-hermes nil "Hermes backend of `agent-dash'." :group 'agent-dash)
@@ -33,7 +34,7 @@
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql hermes)))
   "Hermes implementation of `agent-dash-backend-capabilities'."
-  (list :quit 'stop :steer nil :images nil :models nil))
+  (list :quit 'stop :steer nil :images t :models nil))
 
 (defun agent-dash-hermes--command ()
   "Return the ACP command line."
@@ -61,36 +62,48 @@ A change of kind, or a tool call in between, starts a new item."
 
 (defun agent-dash-hermes--update (session update)
   "Apply ACP session UPDATE to SESSION."
-  (let ((text (or (agent-dash-jget update "content" "text") "")))
-    (pcase (agent-dash-jget update "sessionUpdate")
-      ("user_message_chunk"
-       (let ((id (agent-dash-hermes--segment session 'user)))
-         (agent-dash-emit session (list :type 'user :id id
-                                        :text (agent-dash-hermes--append session id :text text)))))
-      ((and (or "agent_message_chunk" "agent_thought_chunk") kind)
-       (let ((id (agent-dash-hermes--segment session 'assistant))
-             (key (if (equal kind "agent_message_chunk") :text :thinking)))
-         (agent-dash-emit session (list :type 'assistant :id id :final t
-                                        key (agent-dash-hermes--append session id key text)))))
-      ((and (or "tool_call" "tool_call_update") kind)
-       (when (equal kind "tool_call") (agent-dash-set-data session :kind 'tool))
-       (agent-dash-emit
-        session
-        (append (list :type 'tool :id (agent-dash-jget update "toolCallId")
-                      :status (pcase (agent-dash-jget update "status")
-                                ("completed" 'success) ("failed" 'error) (_ 'running)))
-                (when-let* ((title (agent-dash-jget update "title")))
-                  (list :name (or (agent-dash-jget update "kind") "tool") :args title))
-                (when-let* ((content (agent-dash-jget update "content")))
-                  (list :output (agent-dash-hermes--tool-text content))))))
-      ("session_info_update"
-       (agent-dash-emit session (list :type 'meta :title (agent-dash-jget update "title"))))
-      ("available_commands_update"
-       (agent-dash-set-data session :command-catalog
-                            (agent-dash-command-entries
-                             (agent-dash-jget update "availableCommands"))))
-      ;; Plans and modes are not shown.
-      (_ nil))))
+  (let* ((content (agent-dash-jget update "content")))
+    (let ((text (or (agent-dash-jget content "text") "")))
+      (pcase (agent-dash-jget update "sessionUpdate")
+        ("user_message_chunk"
+         (let ((id (agent-dash-hermes--segment session 'user)))
+           (agent-dash-emit session (list :type 'user :id id
+                                          :text (agent-dash-hermes--append session id :text text)
+                                          :images (append
+                                                   (plist-get (agent-dash-item session id) :images)
+                                                   (agent-dash-images-from-blocks
+                                                    (list content) t))))))
+        ((and (or "agent_message_chunk" "agent_thought_chunk") kind)
+         (let ((id (agent-dash-hermes--segment session 'assistant))
+               (key (if (equal kind "agent_message_chunk") :text :thinking)))
+           (agent-dash-emit session (list :type 'assistant :id id :final t
+                                          key (agent-dash-hermes--append session id key text)
+                                          :images (append
+                                                   (plist-get (agent-dash-item session id) :images)
+                                                   (agent-dash-images-from-blocks
+                                                    (list content)))))))
+        ((and (or "tool_call" "tool_call_update") kind)
+         (when (equal kind "tool_call") (agent-dash-set-data session :kind 'tool))
+         (agent-dash-emit
+          session
+          (append (list :type 'tool :id (agent-dash-jget update "toolCallId")
+                        :status (pcase (agent-dash-jget update "status")
+                                  ("completed" 'success) ("failed" 'error) (_ 'running)))
+                  (when-let* ((title (agent-dash-jget update "title")))
+                    (list :name (or (agent-dash-jget update "kind") "tool") :args title))
+                  (when-let* ((content (agent-dash-jget update "content")))
+                    (list :output (agent-dash-hermes--tool-text content)
+                          :images (agent-dash-images-from-blocks
+                                   (mapcar (lambda (block) (agent-dash-jget block "content"))
+                                           content)))))))
+        ("session_info_update"
+         (agent-dash-emit session (list :type 'meta :title (agent-dash-jget update "title"))))
+        ("available_commands_update"
+         (agent-dash-set-data session :command-catalog
+                              (agent-dash-command-entries
+                               (agent-dash-jget update "availableCommands"))))
+        ;; Plans and modes are not shown.
+        (_ nil)))))
 
 (defun agent-dash-hermes--record (session record)
   "Translate ACP RECORD into events of SESSION."
@@ -101,7 +114,9 @@ A change of kind, or a tool call in between, starts a new item."
        (agent-dash-set-data session :kind 'user)
        (agent-dash-set-data session :seg (1+ (or (agent-dash-data session :seg) 0)))
        (agent-dash-emit session (list :type 'user :id (agent-dash-jget record "id")
-                                      :text (agent-dash-jget record "text")))
+                                      :text (agent-dash-jget record "text")
+                                      :images (agent-dash-images-from-blocks
+                                               (agent-dash-jget record "images"))))
        (agent-dash-emit session '(:type run :state running)))
       ("agent_dash_exit"
        (agent-dash-emit session '(:type run :state dead))
@@ -159,7 +174,13 @@ A change of kind, or a tool call in between, starts a new item."
         (agent-dash-holder-start dir (agent-dash-session-root session)
                                  (agent-dash-hermes--command))
         (agent-dash-holder-attach session dir #'agent-dash-hermes--record t)
-        (agent-dash-holder-request session "initialize" agent-dash-hermes--client)
+        (agent-dash-holder-request
+         session "initialize" agent-dash-hermes--client
+         (lambda (result _error)
+           (when (agent-dash-jget result "agentCapabilities")
+             (agent-dash-set-data session :images-supported
+                                  (if (agent-dash-jget result "agentCapabilities"
+                                                       "promptCapabilities" "image") t :false)))))
         (if (not resume-id)
             (agent-dash-holder-request session "session/new" (agent-dash-hermes--place session))
           (agent-dash-holder-set-sid session resume-id)
@@ -168,13 +189,22 @@ A change of kind, or a tool call in between, starts a new item."
                                      (append (list :sessionId resume-id)
                                              (agent-dash-hermes--place session))))))))
 
-(cl-defmethod agent-dash-backend-send ((_ (eql hermes)) session text _images _mode)
-  "Hermes `agent-dash-backend-send' for SESSION and TEXT."
-  (let ((sid (or (agent-dash-data session :sid) (user-error "Hermes has no session yet"))))
-    (agent-dash-holder-log session (list :type "agent_dash_user" :id (agent-dash-uuid) :text text))
-    (agent-dash-holder-request session "session/prompt"
-                               (list :sessionId sid
-                                     :prompt (vector (list :type "text" :text text))))))
+(cl-defmethod agent-dash-backend-send ((_ (eql hermes)) session text images _mode)
+  "Hermes `agent-dash-backend-send' for SESSION, TEXT and IMAGES."
+  (when (and images (eq (agent-dash-data session :images-supported) :false))
+    (user-error "This Hermes server does not support image prompts"))
+  (let* ((sid (or (agent-dash-data session :sid) (user-error "Hermes has no session yet")))
+         (token (agent-dash-data session :image-draft-token))
+         (blocks (mapcar (lambda (image) (list :type "image" :data (plist-get image :data)
+                                               :mimeType (plist-get image :mime-type))) images)))
+    (agent-dash-holder-log session (list :type "agent_dash_user" :id (agent-dash-uuid)
+                                         :text text :images (vconcat blocks)))
+    (agent-dash-holder-request
+     session "session/prompt"
+     (list :sessionId sid :prompt (vconcat (unless (string-empty-p text)
+                                             (list (list :type "text" :text text))) blocks))
+     (when images
+       (lambda (_result error) (when error (agent-dash-image-send-failed session token error)))))))
 
 (cl-defmethod agent-dash-backend-cancel ((_ (eql hermes)) session)
   "Hermes `agent-dash-backend-cancel' for SESSION."
@@ -193,8 +223,9 @@ A change of kind, or a tool call in between, starts a new item."
   "Hermes `agent-dash-backend-respond' for SESSION, REQUEST and ANSWER."
   (let* ((id (plist-get request :id))
          (wanted (if (eq answer 'allow) "allow_once" "reject_once"))
-         (option (seq-find (lambda (o) (equal (agent-dash-jget o "kind") wanted))
-                           (cdr (assoc id (agent-dash-data session :options))))))
+         (option (unless (eq answer :cancelled)
+                   (seq-find (lambda (o) (equal (agent-dash-jget o "kind") wanted))
+                             (cdr (assoc id (agent-dash-data session :options)))))))
     (agent-dash-holder-reply
      session id
      (list :outcome (if option
@@ -218,19 +249,21 @@ A change of kind, or a tool call in between, starts a new item."
                           (condition-case nil (agent-dash-json-read raw)
                             (json-error raw)) raw))
              (text (if (or (stringp content) (listp content))
-                       (agent-dash-json-text content) "")))
+                       (agent-dash-json-text content) ""))
+             (images (agent-dash-images-from-blocks content)))
         (when (and (member role '("user" "assistant"))
                    (member (agent-dash-jget message "display_kind") '(nil ""))
                    (member (agent-dash-jget message "_compressed_summary") '(nil 0 ""))
                    (not (and (equal (agent-dash-jget message "active") 0)
                              (equal (agent-dash-jget message "compacted") 0)))
-                   (not (string-blank-p text))
+                   (or (not (string-blank-p text)) images)
                    (not (string-match-p
                          (concat "\\`\\(?:\\[CONTEXT COMPACTION — REFERENCE ONLY\\]"
                                  "\\|\\[CONTEXT SUMMARY\\]:\\)")
                          (string-trim-left text)))
                    (not (string-search "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]" text)))
-          (list :role role :text text :time (agent-dash-jget message "timestamp")))))
+          (list :role role :text text :images images
+                :time (agent-dash-jget message "timestamp")))))
     (agent-dash-sqlite-rows
      file (concat "SELECT * FROM messages WHERE session_id=" (agent-dash-sqlite-quote id)
                   " ORDER BY timestamp, rowid")))))

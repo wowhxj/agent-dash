@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-images)
 (require 'agent-dash-holder)
 
 (defgroup agent-dash-claude nil "Claude Code backend of `agent-dash'." :group 'agent-dash)
@@ -63,10 +64,13 @@ CALLBACK, if non-nil, receives the response."
   "Return the human-written text of user EVENT, or nil."
   (unless (or (agent-dash-jget event "isMeta") (agent-dash-jget event "isSidechain")
               (agent-dash-jget event "isCompactSummary"))
-    (let ((text (agent-dash-json-text (agent-dash-jget event "message" "content"))))
+    (let* ((content (agent-dash-jget event "message" "content"))
+           (text (agent-dash-json-text content)))
       ;; ponytail: "<" also drops a real prompt that starts with a tag; it is
       ;; how Claude Code marks command output and injected reminders.
-      (and (not (string-blank-p text)) (not (string-prefix-p "<" text)) text))))
+      (cond ((and (not (string-blank-p text)) (not (string-prefix-p "<" text))) text)
+            ((agent-dash-images-from-blocks content)
+             (if (string-blank-p text) "[image]" text))))))
 
 (defun agent-dash-claude--args (input)
   "Return a one-line summary of tool INPUT."
@@ -84,10 +88,11 @@ CALLBACK, if non-nil, receives the response."
                       (or (agent-dash-data session :partial) '("" . ""))
                     '("" . "")))
          (text (concat (car acc) (car partial)))
-         (thinking (concat (cdr acc) (cdr partial))))
-    (unless (and (string-empty-p text) (string-empty-p thinking))
+         (thinking (concat (cdr acc) (cdr partial)))
+         (images (gethash id (agent-dash-claude--table session :image-acc))))
+    (unless (and (string-empty-p text) (string-empty-p thinking) (not images))
       (agent-dash-emit session (list :type 'assistant :id id :text text
-                                     :thinking thinking :final final)))))
+                                     :thinking thinking :images images :final final)))))
 
 (defun agent-dash-claude--stream (session event)
   "Apply streaming EVENT of SESSION."
@@ -118,6 +123,10 @@ CALLBACK, if non-nil, receives the response."
   (let* ((id (agent-dash-jget event "message" "id"))
          (acc-table (agent-dash-claude--table session :acc))
          (acc (gethash id acc-table (cons "" ""))))
+    (when-let* ((images (agent-dash-images-from-blocks
+                         (agent-dash-jget event "message" "content"))))
+      (let ((table (agent-dash-claude--table session :image-acc)))
+        (puthash id (append (gethash id table) images) table)))
     (dolist (block (agent-dash-jget event "message" "content"))
       (pcase (agent-dash-jget block "type")
         ("text" (setcar acc (concat (car acc) (agent-dash-jget block "text"))))
@@ -148,6 +157,7 @@ CALLBACK, if non-nil, receives the response."
                              (list :type 'tool :id (agent-dash-jget block "tool_use_id")
                                    :output (if (stringp output) output
                                              (agent-dash-json-text output))
+                                   :images (agent-dash-images-from-blocks output)
                                    :status (if (agent-dash-jget block "is_error")
                                                'error 'success)))))))
     (let ((uuid (agent-dash-jget event "uuid")))
@@ -159,7 +169,9 @@ CALLBACK, if non-nil, receives the response."
           (agent-dash-emit session
                            (if (string-prefix-p "[Request interrupted" text)
                                (list :type 'notice :id uuid :text "interrupted")
-                             (list :type 'user :id uuid :text text)))))))))
+                             (list :type 'user :id uuid
+                                   :text (agent-dash-json-text content)
+                                   :images (agent-dash-images-from-blocks content t))))))))))
 
 (defun agent-dash-claude--permission (session event)
   "Turn can_use_tool control request EVENT of SESSION into a request event."
@@ -333,7 +345,7 @@ Recover the startup record for sessions opened before this feature loaded."
                                                      :media_type (plist-get i :mime-type)
                                                      :data (plist-get i :data))))
                      images)
-             (list (list :type "text" :text text)))))
+             (unless (string-empty-p text) (list (list :type "text" :text text))))))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql claude)) session text images mode)
   "Claude `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
@@ -363,7 +375,8 @@ Recover the startup record for sessions opened before this feature loaded."
   (let* ((id (plist-get request :id))
          (input (gethash id (agent-dash-claude--table session :inputs)))
          (response
-          (pcase (plist-get request :kind)
+          (pcase (if (eq answer :cancelled) 'cancelled (plist-get request :kind))
+            ('cancelled (list :behavior "deny" :message "The user cancelled this request."))
             ('questions
              (let ((answers (make-hash-table :test #'equal))
                    (updated (copy-hash-table input)))

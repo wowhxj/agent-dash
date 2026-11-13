@@ -10,8 +10,11 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-images)
+(require 'agent-dash-pi-commands)
 (require 'agent-dash-holder)
 (require 'ansi-color)
+(require 'json)
 
 (defgroup agent-dash-pi nil "Pi backend of `agent-dash'." :group 'agent-dash)
 
@@ -68,8 +71,8 @@
         ((stringp args) args)
         (t (or (agent-dash-jget args "command") (agent-dash-jget args "path")
                (agent-dash-jget args "file_path")
-               (mapconcat (lambda (k) (format "%s=%s" k (gethash k args)))
-                          (hash-table-keys args) " ")))))
+               (agent-dash-jget args "question")
+               (json-encode args)))))
 
 (defun agent-dash-pi--tool-output (result)
   "Return the text of tool RESULT."
@@ -93,13 +96,15 @@
     (pcase (agent-dash-jget message "role")
       ("user"
        (agent-dash-emit session (list :type 'user :id (concat "u" id)
-                                      :text (agent-dash-json-text content))))
+                                      :text (agent-dash-json-text content)
+                                      :images (agent-dash-images-from-blocks content t))))
       ("assistant"
        (let ((text (agent-dash-pi--blocks content "text" "text"))
-             (thinking (agent-dash-pi--blocks content "thinking" "thinking")))
-         (unless (and (string-empty-p text) (string-empty-p thinking))
+             (thinking (agent-dash-pi--blocks content "thinking" "thinking"))
+             (images (agent-dash-images-from-blocks content)))
+         (unless (and (string-empty-p text) (string-empty-p thinking) (not images))
            (agent-dash-emit session (list :type 'assistant :id (concat "a" id)
-                                          :text text :thinking thinking :final t
+                                          :text text :thinking thinking :images images :final t
                                           :process (seq-some
                                                     (lambda (b)
                                                       (equal (agent-dash-jget b "type")
@@ -122,6 +127,7 @@
                         (list :type 'tool :id (agent-dash-jget message "toolCallId")
                               :name (agent-dash-jget message "toolName")
                               :output (agent-dash-json-text content)
+                              :images (agent-dash-images-from-blocks content)
                               :status (if (agent-dash-jget message "isError")
                                           'error 'success))))
       ("compactionSummary"
@@ -161,27 +167,41 @@
 
 (defun agent-dash-pi--ui-request (session record)
   "Handle extension UI RECORD of SESSION."
-  (let ((id (agent-dash-jget record "id"))
-        (title (or (agent-dash-jget record "title") "")))
+  (let* ((id (agent-dash-jget record "id"))
+         (title (or (agent-dash-jget record "title") ""))
+         (secret (string-prefix-p "[agent-dash:secret] " title)))
     (pcase (agent-dash-jget record "method")
       ((and (or "select" "confirm" "input" "editor") method)
        (agent-dash-emit
         session
-        (list :type 'request :id id
-              :kind (pcase method ("select" 'select) ("confirm" 'confirm) (_ 'input))
-              :title (string-trim (concat title " " (or (agent-dash-jget record "message") "")))
-              :options (agent-dash-jget record "options")
-              :default (agent-dash-jget record "prefill")))
+        (append
+         (list :type 'request :id id
+               :kind (if secret 'secret
+                       (pcase method ("select" 'select) ("confirm" 'confirm) (_ 'input)))
+               :title (if secret (substring title 20) title)
+               :options (agent-dash-jget record "options")
+               :default (unless secret (agent-dash-jget record "prefill")))
+         (when-let* ((message (agent-dash-jget record "message")))
+           (list :message message))
+         (when-let* ((placeholder (and (not secret) (agent-dash-jget record "placeholder"))))
+           (list :placeholder placeholder))))
        ;; Pi resolves a timed-out dialog by itself.
        (when-let* ((timeout (agent-dash-jget record "timeout")))
          (run-at-time (/ timeout 1000.0) nil #'agent-dash-emit session
-                      (list :type 'request-done :id id))))
+                      (list :type 'request-done :id id :status 'cancelled))))
+      ("dismiss_dialog"
+       (agent-dash-emit session (list :type 'request-done :id id :status 'cancelled)))
       ("notify"
-       (agent-dash-emit session
-                        (list :type 'notice
-                              :level (intern (or (agent-dash-jget record "notifyType") "info"))
-                              :text (ansi-color-filter-apply
-                                     (or (agent-dash-jget record "message") "")))))
+       (let ((message (or (agent-dash-jget record "message") "")))
+         (if (string-prefix-p "[agent-dash:native] " message)
+             (condition-case nil
+                 (agent-dash-pi-native-record
+                  session (agent-dash-json-read (substring message 20)))
+               (json-error (message "Pi sent an invalid native-command result")))
+           (agent-dash-emit
+            session (list :type 'notice
+                          :level (intern (or (agent-dash-jget record "notifyType") "info"))
+                          :text (ansi-color-filter-apply message))))))
       ("setStatus"
        (agent-dash-emit session
                         (list :type 'meta
@@ -194,10 +214,16 @@
 (defun agent-dash-pi--record (session record)
   "Translate Pi RPC RECORD into events of SESSION."
   (pcase (agent-dash-jget record "type")
+    ((or "agent_dash_native_started" "agent_dash_native_result")
+     (agent-dash-pi-native-record session record))
     ("response" (agent-dash-pi--response session record))
     ("agent_start"
      (agent-dash-emit session '(:type meta :phase "waiting for model"))
      (agent-dash-emit session '(:type run :state running)))
+    ("agent_end"
+     (dolist (request (copy-sequence (agent-dash-session-requests session)))
+       (agent-dash-emit session (list :type 'request-done :id (plist-get request :id)
+                                      :status 'cancelled))))
     ("agent_settled"
      (agent-dash-emit session '(:type run :state idle))
      (agent-dash-pi--refresh-stats session))
@@ -228,7 +254,9 @@
                   (list :args (agent-dash-pi--args args)))
                 (when-let* ((result (or (agent-dash-jget record "result")
                                         (agent-dash-jget record "partialResult"))))
-                  (list :output (agent-dash-pi--tool-output result)))))))
+                  (list :output (agent-dash-pi--tool-output result)
+                        :images (agent-dash-images-from-blocks
+                                 (agent-dash-jget result "content"))))))))
     ("queue_update"
      (agent-dash-emit session (list :type 'queue
                                     :steering (agent-dash-jget record "steering")
@@ -249,11 +277,12 @@
                                                   (agent-dash-jget record "error")))))
     ("extension_ui_request" (agent-dash-pi--ui-request session record))
     ("agent_dash_exit"
+     (agent-dash-pi-native-reset session)
      (agent-dash-emit session '(:type run :state dead))
      (agent-dash-emit session (list :type 'notice :level 'warning
                                     :text (format "Pi exited (code %s); C-c C-r resumes"
                                                   (agent-dash-jget record "code")))))
-    ;; agent_end, turn_*, compaction_end, auto_retry_end, summarization_*:
+    ;; turn_*, compaction_end, auto_retry_end, summarization_*:
     ;; their content arrives through other records.
     (_ nil)))
 
@@ -330,7 +359,7 @@ Keep pre-compaction messages, but never replay abandoned branches."
        dir (agent-dash-session-root session)
        (append (list (or (executable-find agent-dash-pi-executable)
                          (user-error "Cannot find `%s'" agent-dash-pi-executable))
-                     "--mode" "rpc")
+                     "--mode" "rpc" "--extension" agent-dash-pi-bridge-file)
                (if resume-id
                    (list "--session"
                          (or (agent-dash-pi--file resume-id)
@@ -345,21 +374,30 @@ Keep pre-compaction messages, but never replay abandoned branches."
 
 (cl-defmethod agent-dash-backend-send ((_ (eql pi)) session text images mode)
   "Pi `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
-  (agent-dash-pi--request
-   session
-   (append (list :type "prompt" :message text)
-           (when images
-             (list :images (vconcat (mapcar (lambda (i) (list :type "image"
-                                                              :data (plist-get i :data)
-                                                              :mimeType (plist-get i :mime-type)))
-                                            images))))
-           (pcase mode
-             ('follow-up '(:streamingBehavior "followUp"))
-             ('steer '(:streamingBehavior "steer"))))
-   (lambda (ok _data error)
-     (unless ok
-       (agent-dash-emit session (list :type 'notice :level 'error
-                                      :text (format "Not sent (%s); M-p recalls it" error)))))))
+  (when (agent-dash-data session :pi-native-pending)
+    (user-error "Finish the pending Pi native command first"))
+  (if (agent-dash-pi-native-command-p session text)
+      (progn
+        (when images (user-error "Remove images before running Pi commands"))
+        (agent-dash-backend-command 'pi session text mode))
+    (let ((token (agent-dash-data session :image-draft-token)))
+      (agent-dash-pi--request
+       session
+       (append (list :type "prompt" :message text)
+               (when images
+                 (list :images (vconcat (mapcar (lambda (i)
+                                                  (list :type "image" :data (plist-get i :data)
+                                                        :mimeType (plist-get i :mime-type)))
+                                                images))))
+               (pcase mode
+                 ('follow-up '(:streamingBehavior "followUp"))
+                 ('steer '(:streamingBehavior "steer"))))
+       (lambda (ok _data error)
+         (unless ok
+           (if images (agent-dash-image-send-failed session token error)
+             (agent-dash-emit session (list :type 'notice :level 'error
+                                            :text (format "Not sent (%s); M-p recalls it"
+                                                          error))))))))))
 
 (cl-defmethod agent-dash-backend-cancel ((_ (eql pi)) session)
   "Pi `agent-dash-backend-cancel' for SESSION."
@@ -378,9 +416,11 @@ Keep pre-compaction messages, but never replay abandoned branches."
   (agent-dash-holder-write
    session
    (append (list :type "extension_ui_response" :id (plist-get request :id))
-           (if (eq (plist-get request :kind) 'confirm)
-               (list :confirmed (if answer t :false))
-             (list :value answer)))))
+           (cond
+            ((eq answer :cancelled) '(:cancelled t))
+            ((eq (plist-get request :kind) 'confirm)
+             (list :confirmed (if answer t :false)))
+            (t (list :value answer))))))
 
 (cl-defmethod agent-dash-backend-commands ((_ (eql pi)) session)
   "Read Pi's RPC command catalog for SESSION without invoking a model."
@@ -390,15 +430,15 @@ Keep pre-compaction messages, but never replay abandoned branches."
      (lambda (ok data _error)
        (setq done t)
        (when ok
-         (setq commands (agent-dash-command-entries (agent-dash-jget data "commands")))
-         (agent-dash-set-data session :command-catalog
-                              (cons '("compact" . "Compact context") commands)))))
+         (setq commands (agent-dash-pi-command-catalog session
+                                                       (agent-dash-jget data "commands")))
+         (agent-dash-set-data session :command-catalog commands))))
     (let ((deadline (+ (float-time) 3)))
       (while (and (not done) (< (float-time) deadline))
         (accept-process-output nil 0.05)))
     (unless done
       (message "Pi command catalog is loading; reopen TAB completion when ready"))
-    (cons '("compact" . "Compact context") commands)))
+    (or commands (agent-dash-pi-native-commands session))))
 
 (cl-defmethod agent-dash-backend-command ((_ (eql pi)) session text mode)
   "Execute native Pi TEXT in SESSION with MODE, using RPC for /compact."
@@ -414,7 +454,17 @@ Keep pre-compaction messages, but never replay abandoned branches."
            (agent-dash-emit session (list :type 'notice :level (if ok 'info 'error)
                                           :text (if ok "Context compacted" error)))
            (when ok (agent-dash-pi--refresh-stats session)))))
-    (agent-dash-backend-send 'pi session text nil mode)))
+    (unless (string-match
+             "\\`/\\([^[:space:]]+\\)\\(?:[[:space:]]+\\(\\(?:.\\|\n\\)*\\)\\)?\\'" text)
+      (user-error "Invalid Pi command"))
+    (let ((name (match-string 1 text)) (args (string-trim (or (match-string 2 text) ""))))
+      (if (assoc name (agent-dash-pi-native-commands session))
+          (agent-dash-pi-native-execute session name args)
+        (unless (and (not (equal name "agent-dash-native"))
+                     (assoc name (or (agent-dash-data session :command-catalog)
+                                     (agent-dash-backend-commands 'pi session))))
+          (user-error "Unknown Pi command /%s; not sent to a model" name))
+        (agent-dash-backend-send 'pi session text nil mode)))))
 
 (cl-defmethod agent-dash-backend-models ((_ (eql pi)) session)
   "Pi `agent-dash-backend-models' for SESSION."
@@ -447,13 +497,12 @@ Keep pre-compaction messages, but never replay abandoned branches."
                                 (message "Pi: %s" error))))))
 
 (defun agent-dash-pi--user-entry (line)
-  "Return the parsed entry of LINE if it is a user message with text."
+  "Return the parsed entry of LINE if it is a user message with text or an image."
   (when (string-match-p "\"role\"[ \t]*:[ \t]*\"user\"" line)
     (condition-case nil
         (let ((entry (agent-dash-json-read line)))
           (when (and (equal (agent-dash-jget entry "message" "role") "user")
-                     (not (string-blank-p (agent-dash-pi--blocks-text
-                                           (agent-dash-jget entry "message" "content")))))
+                     (not (string-blank-p (agent-dash-pi--entry-text entry))))
             entry))
       (json-error
        (push "Pi: malformed user record" agent-dash-history-warnings)
@@ -461,7 +510,9 @@ Keep pre-compaction messages, but never replay abandoned branches."
 
 (defun agent-dash-pi--entry-text (entry)
   "Return the user text of message ENTRY."
-  (agent-dash-pi--blocks-text (agent-dash-jget entry "message" "content")))
+  (let* ((content (agent-dash-jget entry "message" "content")))
+    (let ((text (agent-dash-pi--blocks-text content)))
+      (if (and (string-blank-p text) (agent-dash-images-from-blocks content)) "[image]" text))))
 
 (defun agent-dash-pi--session-info (file)
   "Return the session plist of Pi session FILE, or nil if it is not one."

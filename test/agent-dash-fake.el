@@ -22,15 +22,41 @@
       (accept-process-output nil 0.02))
     (should (funcall predicate))))
 
+(defun agent-dash-test-stop-holder (dir)
+  "Stop the fixture agent in DIR and wait for its final log record before cleanup."
+  (when-let* ((pid (agent-dash-holder-pid (file-name-as-directory dir))))
+    (signal-process pid 'KILL)
+    (let ((log (expand-file-name "out.jsonl" dir))
+          (deadline (+ (float-time) 3)) done)
+      (while (and (not done) (< (float-time) deadline))
+        (setq done (and (file-readable-p log)
+                        (with-temp-buffer
+                          (insert-file-contents log)
+                          (string-search "\"agent_dash_exit\"" (buffer-string)))))
+        (unless done
+          ;; The shell can restore a pipe fd after its first wake-up write;
+          ;; another newline makes a now-readerless relay notice SIGPIPE.
+          ;; Nonblocking open avoids hanging if the fixture already exited.
+          (when (file-exists-p (expand-file-name "code" dir))
+            (call-process
+             "python3" nil nil nil "-c"
+             (concat "import os,sys\ntry:\n"
+                     " fd=os.open(sys.argv[1],os.O_WRONLY|os.O_NONBLOCK)\n"
+                     " try: os.write(fd,b'\\n')\n finally: os.close(fd)\n"
+                     "except OSError: pass\n")
+             (expand-file-name "in" dir)))
+          (accept-process-output nil 0.01)))
+      (should done))))
+
 (defmacro agent-dash-test-with-holders (&rest body)
   "Run BODY with a temporary `agent-dash-directory'; kill its agents after."
   (declare (indent 0))
   `(let ((agent-dash-directory (make-temp-file "agent-dash-test" t)))
      (unwind-protect (progn ,@body)
-       (dolist (dir (directory-files (expand-file-name "instances" agent-dash-directory)
-                                     t "\\`[^.]"))
-         (when-let* ((pid (agent-dash-holder-pid (file-name-as-directory dir))))
-           (signal-process pid 'KILL)))
+       (when (file-directory-p (expand-file-name "instances" agent-dash-directory))
+         (dolist (dir (directory-files (expand-file-name "instances" agent-dash-directory)
+                                       t "\\`[^.]"))
+           (agent-dash-test-stop-holder dir)))
        (delete-directory agent-dash-directory t))))
 
 (defvar agent-dash-fake-calls nil "Backend calls, newest first.")

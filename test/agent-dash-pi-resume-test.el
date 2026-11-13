@@ -46,13 +46,15 @@
               (agent-dash-backend-start 'pi session id)
               (should attached)
               (should (equal (car started)
-                             (list "offline-pi" "--mode" "rpc" "--session" file "--test-option")))))
+                             (list "offline-pi" "--mode" "rpc" "--extension"
+                                   agent-dash-pi-bridge-file "--session" file "--test-option")))))
           (setq started nil)
           (let ((session (agent-dash-session-create 'pi base)))
             (agent-dash-backend-start 'pi session)
-            (should (equal (seq-take (car started) 4)
-                           '("offline-pi" "--mode" "rpc" "--session-id")))
-            (should (equal (nth 4 (car started)) (agent-dash-data session :sid))))
+            (should (equal (seq-take (car started) 6)
+                           (list "offline-pi" "--mode" "rpc" "--extension"
+                                 agent-dash-pi-bridge-file "--session-id")))
+            (should (equal (nth 6 (car started)) (agent-dash-data session :sid))))
           ;; A missing saved file must not silently become an empty new session.
           (setq started nil attached nil)
           (should-error (agent-dash-backend-start

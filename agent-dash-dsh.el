@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-images)
 (require 'agent-dash-holder)
 (require 'url)
 (require 'websocket)
@@ -50,7 +51,7 @@ The cookie lives only in memory.")
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql dsh)))
   "DSH implementation of `agent-dash-backend-capabilities'."
-  (list :quit 'detach :steer t :images nil :models nil))
+  (list :quit 'detach :steer t :images t :models nil))
 
 ;;;; Host discovery and authentication
 
@@ -292,6 +293,35 @@ replacements cannot overwrite a newer value of the same projection."
          (agent-dash-dsh--apply-projections
           session values (agent-dash-jget value "seq")))))))
 
+(defun agent-dash-dsh--images (session blocks)
+  "Normalize images in BLOCKS, loading Host-owned attachments once per SESSION.
+This runs on protocol input, never during display-only redraw."
+  (let ((cache (or (agent-dash-data session :attachment-images)
+                   (agent-dash-set-data session :attachment-images
+                                        (make-hash-table :test #'equal)))) images)
+    (dolist (block blocks)
+      (when (equal (agent-dash-jget block "type") "image")
+        (let* ((attachment (agent-dash-jget block "attachment"))
+               (key (and attachment (json-serialize attachment)))
+               (image (and key (gethash key cache))))
+          (unless image
+            (setq image
+                  (if (and attachment (not (agent-dash-jget block "data")))
+                      (condition-case nil
+                          (let ((reply (agent-dash-dsh--call
+                                        "session/attachment"
+                                        (list :request
+                                              (list :sessionId (agent-dash-data session :sid)
+                                                    :attachment attachment)))))
+                            (list :data (agent-dash-jget reply "data")
+                                  :mime-type (agent-dash-jget reply "attachment" "mediaType")
+                                  :name (or (agent-dash-jget attachment "name") "Host image")))
+                        (error (list :name "Host image unavailable")))
+                    (car (agent-dash-images-from-blocks (list block)))))
+            (when key (puthash key image cache)))
+          (push image images))))
+    (nreverse images)))
+
 (defun agent-dash-dsh--event (session event)
   "Translate DSH session EVENT into events of SESSION; skip seen seqs."
   (let ((seq (agent-dash-jget event "seq"))
@@ -308,7 +338,9 @@ replacements cannot overwrite a newer value of the same projection."
                               (list :type 'user
                                     :id (or (agent-dash-jget message "id") (format "s%s" seq))
                                     :text (agent-dash-dsh--text
-                                           (agent-dash-jget message "content") "text"))))))
+                                           (agent-dash-jget message "content") "text")
+                                    :images (agent-dash-dsh--images
+                                             session (agent-dash-jget message "content")))))))
         ("assistant/message"
          (let* ((blocks (agent-dash-jget data "message" "content"))
                 ;; The streamed preview becomes the final message in place.
@@ -316,11 +348,12 @@ replacements cannot overwrite a newer value of the same projection."
                         (agent-dash-jget data "message" "id") (format "s%s" seq))))
            (agent-dash-set-data session :live-id nil)
            (let ((text (agent-dash-dsh--text blocks "text"))
-                 (thinking (agent-dash-dsh--text blocks "reasoning")))
-             (unless (and (string-empty-p text) (string-empty-p thinking)
+                 (thinking (agent-dash-dsh--text blocks "reasoning"))
+                 (images (agent-dash-dsh--images session blocks)))
+             (unless (and (string-empty-p text) (string-empty-p thinking) (not images)
                           (not (agent-dash-item session id)))
                (agent-dash-emit session (list :type 'assistant :id id :text text
-                                              :thinking thinking :final t))))))
+                                              :thinking thinking :images images :final t))))))
         ("tool/call"
          (agent-dash-emit session (list :type 'tool
                                         :id (or (agent-dash-jget data "callId") (format "s%s" seq))
@@ -337,6 +370,7 @@ replacements cannot overwrite a newer value of the same projection."
              (agent-dash-emit session
                               (list :type 'tool :id id
                                     :output (agent-dash-dsh--text blocks "text")
+                                    :images (agent-dash-dsh--images session blocks)
                                     :status (if (or (agent-dash-jget data "error")
                                                     (seq-some (lambda (b)
                                                                 (agent-dash-jget b "isError"))
@@ -532,8 +566,10 @@ replacements cannot overwrite a newer value of the same projection."
     (agent-dash-dsh--ensure-events)
     (agent-dash-dsh--follow session)))
 
-(cl-defmethod agent-dash-backend-send ((_ (eql dsh)) session text _images mode)
-  "DSH `agent-dash-backend-send' for SESSION, TEXT and MODE."
+(cl-defmethod agent-dash-backend-send ((_ (eql dsh)) session text images mode)
+  "DSH `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
+  (when (and images (string-prefix-p "/" text))
+    (user-error "Remove images before running DSH slash commands"))
   (let ((sid (agent-dash-data session :sid)))
     (if (string-match-p "\\`/[a-z]" text)
         ;; Host commands use this endpoint; registered skills bypass it below.
@@ -546,16 +582,22 @@ replacements cannot overwrite a newer value of the same projection."
             (user-error "%s" (or output "DSH command unavailable or rejected")))
           (agent-dash-emit session (list :type 'notice
                                          :text (format "%s: %s" text (or output "done")))))
-      (agent-dash-dsh--prompt session text mode))))
+      (agent-dash-dsh--prompt session text mode images))))
 
-(defun agent-dash-dsh--prompt (session text mode)
-  "Submit TEXT as a normal prompt to SESSION using MODE."
+(defun agent-dash-dsh--prompt (session text mode &optional images)
+  "Submit TEXT and optional IMAGES as a normal prompt to SESSION using MODE."
   (agent-dash-dsh--call
    "session/prompt"
    (list :request (list :requestId (agent-dash-uuid)
                         :sessionId (agent-dash-data session :sid)
                         :mode (if (eq mode 'steer) "steer" "queue")
-                        :content (vector (list :type "text" :text text))))))
+                        :content (vconcat
+                                  (unless (string-empty-p text)
+                                    (list (list :type "text" :text text)))
+                                  (mapcar (lambda (image)
+                                            (list :type "image"
+                                                  :mediaType (plist-get image :mime-type)
+                                                  :data (plist-get image :data))) images))))))
 
 (cl-defmethod agent-dash-backend-commands ((_ (eql dsh)) session)
   "Read SESSION's Host commands and registered skills without invoking a model."
@@ -612,7 +654,7 @@ replacements cannot overwrite a newer value of the same projection."
              :value (list :answers
                           (vconcat
                            (cl-loop for q in (agent-dash-jget raw "questions")
-                                    for a in answer
+                                    for a in (unless (eq answer :cancelled) answer)
                                     for labels = (agent-dash-labels (agent-dash-jget q "options"))
                                     for picked = (if (listp a) a (list a))
                                     collect
