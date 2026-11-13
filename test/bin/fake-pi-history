@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Offline RPC fixture: --session loads a file; --session-id creates an identity."""
+import argparse
+import json
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode")
+parser.add_argument("--session")
+parser.add_argument("--session-id")
+args = parser.parse_args()
+entries = []
+messages = []
+leaf_id = None
+sid = args.session_id
+if args.session:
+    if args.session_id:
+        parser.error("resuming must not force a new session identity")
+    with open(args.session, encoding="utf-8") as stream:
+        entries = [json.loads(line) for line in stream if line.strip()]
+    sid = entries[0]["id"]
+    entries = entries[1:]
+    leaf_id = entries[-1]["id"] if entries else None
+    by_id = {entry["id"]: entry for entry in entries}
+    branch = []
+    current = by_id.get(leaf_id)
+    while current:
+        branch.append(current)
+        current = by_id.get(current.get("parentId"))
+    for entry in reversed(branch):
+        if entry.get("type") == "compaction":
+            messages = []
+        elif entry.get("type") == "message":
+            messages.append(entry["message"]) # current model context, not full UI history
+
+for line in sys.stdin:
+    request = json.loads(line)
+    kind = request["type"]
+    data = None
+    success = True
+    if kind == "get_state":
+        data = {"sessionId": sid, "sessionFile": args.session,
+                "model": {"id": "offline-model"}, "isStreaming": False}
+    elif kind == "get_entries":
+        data = {"entries": entries, "leafId": leaf_id}
+    elif kind == "get_messages":
+        data = {"messages": messages}
+    elif kind == "get_session_stats":
+        data = {"messageCount": len(messages)}
+    else:
+        success = False
+    response = {"id": request["id"], "type": "response", "command": kind,
+                "success": success, "data": data}
+    if not success:
+        response["error"] = "Offline history fixture rejects mutations"
+    print(json.dumps(response, ensure_ascii=False), flush=True)

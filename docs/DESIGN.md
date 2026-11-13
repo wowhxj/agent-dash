@@ -92,7 +92,8 @@ stdout 必须是管道而不是普通文件：Hermes ACP（Python asyncio）遇�
 - 停止：向 pid 发 TERM。
 - 客户端独有的信息（Hermes 不回显的用户 prompt）用 `agent-dash-holder-log` 写入同一日志，回放时顺序不乱。
 - JSON-RPC 后端（Codex、Hermes）的请求 ID 用 uuid，下一次启动的 Emacs 回放旧日志时，旧响应不会误匹配新请求。
-- 接回策略：Pi 从日志末尾开始跟读，并用 `get_messages` 补历史；Claude、Codex、Hermes 从头回放整段日志（各自按 uuid、item id、日志顺序去重或定位）。
+- Pi 启动参数区分新建与恢复：新建使用 `--session-id` 分配 ID；恢复必须先定位真实历史文件并使用 `--session <绝对路径>`，不能假设 CLI 按 ID 能在当前项目目录以外找到文件。缺失历史文件时报错，不静默新建空会话；仍存活的 holder 直接接回，不依赖尚未落盘的历史。
+- 接回策略：Pi 从日志末尾开始跟读，并用 `get_entries` 的 `leafId` 沿父链补全当前分支的历史，包括压缩前消息，排除废弃分支和合成压缩摘要。`get_messages` 只是当前模型上下文，不等同于完整聊天历史；旧版 RPC 不支持完整条目时才回退，并显示上下文受限警告。Claude、Codex、Hermes 从头回放整段日志（各自按 uuid、item id、日志顺序去重或定位）。
 
 不承诺重启电脑后续跑；holder 丢失时显示 `dead`，并提供“从历史恢复”。
 

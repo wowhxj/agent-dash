@@ -5,6 +5,8 @@ while IFS= read -r line; do
   case "$line" in
     *'"get_state"'*)
       printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"model":{"id":"m1"},"thinkingLevel":"high","isStreaming":false}}\n' "$id" ;;
+    *'"get_entries"'*)
+      printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[{"id":"u","parentId":null,"type":"message","message":{"role":"user","content":"old","timestamp":1}}],"leafId":"u"}}\n' "$id" ;;
     *'"get_messages"'*)
       printf '{"id":"%s","type":"response","command":"get_messages","success":true,"data":{"messages":[{"role":"user","content":"old","timestamp":1}]}}\n' "$id" ;;
     *'"prompt"'*)

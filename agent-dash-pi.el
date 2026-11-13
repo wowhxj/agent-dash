@@ -286,6 +286,40 @@
     (when (agent-dash-jget data "isStreaming")
       (agent-dash-emit session '(:type run :state running)))))
 
+(defun agent-dash-pi--branch-messages (entries leaf-id)
+  "Return chronological messages on LEAF-ID's branch of ENTRIES.
+Keep pre-compaction messages, but never replay abandoned branches."
+  (let ((by-id (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal)) messages)
+    (dolist (entry entries) (puthash (agent-dash-jget entry "id") entry by-id))
+    (while (gethash leaf-id by-id)
+      (when (gethash leaf-id seen) (error "Cycle in Pi session history"))
+      (puthash leaf-id t seen)
+      (let ((entry (gethash leaf-id by-id)))
+        (when (equal (agent-dash-jget entry "type") "message")
+          (push (agent-dash-jget entry "message") messages))
+        (setq leaf-id (agent-dash-jget entry "parentId"))))
+    messages))
+
+(defun agent-dash-pi--load-history (session &optional context-only)
+  "Replay SESSION's complete active branch, or CONTEXT-ONLY for older Pi."
+  (agent-dash-pi--request
+   session (list :type (if context-only "get_messages" "get_entries"))
+   (lambda (ok data error)
+     (cond
+      (ok
+       (dolist (message (if context-only (agent-dash-jget data "messages")
+                          (agent-dash-pi--branch-messages
+                           (agent-dash-jget data "entries") (agent-dash-jget data "leafId"))))
+         (agent-dash-pi--message session message))
+       (agent-dash-set-data session :history-loaded t)
+       (agent-dash-pi--refresh-stats session))
+      ((not context-only)
+       (agent-dash-emit session '(:type notice :level warning
+                                        :text "Full history unavailable; showing current context"))
+       (agent-dash-pi--load-history session t))
+      (t (agent-dash-emit session (list :type 'notice :level 'error :text error)))))))
+
 (cl-defmethod agent-dash-backend-start ((_ (eql pi)) session &optional resume-id)
   "Pi `agent-dash-backend-start' for SESSION and RESUME-ID."
   (let* ((sid (or resume-id (agent-dash-uuid)))
@@ -296,21 +330,18 @@
        dir (agent-dash-session-root session)
        (append (list (or (executable-find agent-dash-pi-executable)
                          (user-error "Cannot find `%s'" agent-dash-pi-executable))
-                     "--mode" "rpc" "--session-id" sid)
+                     "--mode" "rpc")
+               (if resume-id
+                   (list "--session"
+                         (or (agent-dash-pi--file resume-id)
+                             (user-error "No saved Pi session %s" resume-id)))
+                 (list "--session-id" sid))
                agent-dash-pi-arguments)))
-    ;; RPC has no session header: ask for state and history.
-    ;; ponytail: a message that ends between attach and get_messages shows twice.
+    ;; RPC has no session header: ask for state and the complete active branch.
     (agent-dash-holder-attach session dir #'agent-dash-pi--record)
     (agent-dash-pi--request session '(:type "get_state")
                             (apply-partially #'agent-dash-pi--on-state session))
-    (agent-dash-pi--request
-     session '(:type "get_messages")
-     (lambda (ok data error)
-       (if ok
-           (dolist (m (agent-dash-jget data "messages"))
-             (agent-dash-pi--message session m))
-         (agent-dash-emit session (list :type 'notice :level 'error :text error)))
-       (agent-dash-pi--refresh-stats session)))))
+    (agent-dash-pi--load-history session)))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql pi)) session text images mode)
   "Pi `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
