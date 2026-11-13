@@ -31,7 +31,7 @@
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql pi)))
   "Pi implementation of `agent-dash-backend-capabilities'."
-  (list :quit 'stop :steer t :images t :models t))
+  (list :quit 'stop :steer t :images t :models t :delete t))
 
 ;;;; Requests
 
@@ -82,6 +82,10 @@
                            ""))
              content ""))
 
+(defun agent-dash-pi--blocks-text (content)
+  "Return the text of message CONTENT, a string or blocks."
+  (if (stringp content) content (agent-dash-pi--blocks content "text" "text")))
+
 (defun agent-dash-pi--message (session message &optional id)
   "Emit the events of complete Pi MESSAGE for SESSION, using ID if given."
   (let ((id (or id (format "%s" (agent-dash-jget message "timestamp"))))
@@ -95,7 +99,12 @@
              (thinking (agent-dash-pi--blocks content "thinking" "thinking")))
          (unless (and (string-empty-p text) (string-empty-p thinking))
            (agent-dash-emit session (list :type 'assistant :id (concat "a" id)
-                                          :text text :thinking thinking :final t)))
+                                          :text text :thinking thinking :final t
+                                          :process (seq-some
+                                                    (lambda (b)
+                                                      (equal (agent-dash-jget b "type")
+                                                             "toolCall"))
+                                                    content))))
          (dolist (block content)
            (when (equal (agent-dash-jget block "type") "toolCall")
              (agent-dash-emit session
@@ -186,14 +195,19 @@
   "Translate Pi RPC RECORD into events of SESSION."
   (pcase (agent-dash-jget record "type")
     ("response" (agent-dash-pi--response session record))
-    ("agent_start" (agent-dash-emit session '(:type run :state running)))
-    ("agent_settled" (agent-dash-emit session '(:type run :state idle)))
+    ("agent_start"
+     (agent-dash-emit session '(:type meta :phase "waiting for model"))
+     (agent-dash-emit session '(:type run :state running)))
+    ("agent_settled"
+     (agent-dash-emit session '(:type run :state idle))
+     (agent-dash-pi--refresh-stats session))
     ("message_start"
      (when (equal (agent-dash-jget record "message" "role") "assistant")
        (agent-dash-set-data session :blocks nil)
        (agent-dash-set-data session :live-id
                             (format "%s" (agent-dash-jget record "message" "timestamp")))))
     ("message_update"
+     (agent-dash-emit session '(:type meta :phase "responding"))
      (agent-dash-pi--stream session (agent-dash-jget record "assistantMessageEvent")))
     ("message_end"
      (let ((message (agent-dash-jget record "message")))
@@ -245,12 +259,28 @@
 
 ;;;; Backend methods
 
+(defun agent-dash-pi--refresh-stats (session)
+  "Refresh cached SESSION statistics without invoking a model."
+  (when-let* ((writer (agent-dash-data session :writer)))
+    (when (process-live-p writer)
+      (condition-case nil
+          (agent-dash-pi--request
+           session '(:type "get_session_stats")
+           (lambda (ok data _error)
+             (when ok
+               (agent-dash-emit
+                session (list :type 'meta :stats data
+                              :context-usage (agent-dash-jget data "contextUsage"))))))
+        ;; The process can exit between the settled event and this query.
+        (user-error nil)))))
+
 (defun agent-dash-pi--on-state (session ok data error)
   "Apply get_state DATA (or ERROR when not OK) to SESSION."
   (if (not ok)
       (agent-dash-emit session (list :type 'notice :level 'error :text error))
     (agent-dash-emit session (list :type 'meta
                                    :model (agent-dash-jget data "model" "id")
+                                   :provider (agent-dash-jget data "model" "provider")
                                    :thinking (agent-dash-jget data "thinkingLevel")
                                    :title (agent-dash-jget data "sessionName")))
     (when (agent-dash-jget data "isStreaming")
@@ -279,7 +309,8 @@
        (if ok
            (dolist (m (agent-dash-jget data "messages"))
              (agent-dash-pi--message session m))
-         (agent-dash-emit session (list :type 'notice :level 'error :text error)))))))
+         (agent-dash-emit session (list :type 'notice :level 'error :text error)))
+       (agent-dash-pi--refresh-stats session)))))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql pi)) session text images mode)
   "Pi `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
@@ -320,6 +351,40 @@
                (list :confirmed (if answer t :false))
              (list :value answer)))))
 
+(cl-defmethod agent-dash-backend-commands ((_ (eql pi)) session)
+  "Read Pi's RPC command catalog for SESSION without invoking a model."
+  (let (done commands)
+    (agent-dash-pi--request
+     session '(:type "get_commands")
+     (lambda (ok data _error)
+       (setq done t)
+       (when ok
+         (setq commands (agent-dash-command-entries (agent-dash-jget data "commands")))
+         (agent-dash-set-data session :command-catalog
+                              (cons '("compact" . "Compact context") commands)))))
+    (let ((deadline (+ (float-time) 3)))
+      (while (and (not done) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (unless done
+      (message "Pi command catalog is loading; reopen TAB completion when ready"))
+    (cons '("compact" . "Compact context") commands)))
+
+(cl-defmethod agent-dash-backend-command ((_ (eql pi)) session text mode)
+  "Execute native Pi TEXT in SESSION with MODE, using RPC for /compact."
+  (if (string-match "\\`/compact\\(?:[[:space:]]+\\(\\(?:.\\|\n\\)*\\)\\)?\\'" text)
+      (progn
+        (unless (eq (agent-dash-session-state session) 'idle)
+          (user-error "Stop the current task before compacting"))
+        (agent-dash-pi--request
+         session (append '(:type "compact")
+                         (when (match-string 1 text)
+                           (list :customInstructions (match-string 1 text))))
+         (lambda (ok _data error)
+           (agent-dash-emit session (list :type 'notice :level (if ok 'info 'error)
+                                          :text (if ok "Context compacted" error)))
+           (when ok (agent-dash-pi--refresh-stats session)))))
+    (agent-dash-backend-send 'pi session text nil mode)))
+
 (cl-defmethod agent-dash-backend-models ((_ (eql pi)) session)
   "Pi `agent-dash-backend-models' for SESSION."
   (let (models done)
@@ -346,23 +411,37 @@
                               (if ok
                                   (agent-dash-emit session
                                                    (list :type 'meta
+                                                         :provider (substring model 0 slash)
                                                          :model (substring model (1+ slash))))
                                 (message "Pi: %s" error))))))
 
+(defun agent-dash-pi--user-entry (line)
+  "Return the parsed entry of LINE if it is a user message with text."
+  (when (string-search "\"role\":\"user\"" line)
+    (let ((entry (agent-dash-json-read line)))
+      (unless (string-blank-p (agent-dash-pi--blocks-text
+                               (agent-dash-jget entry "message" "content")))
+        entry))))
+
+(defun agent-dash-pi--entry-text (entry)
+  "Return the user text of message ENTRY."
+  (agent-dash-pi--blocks-text (agent-dash-jget entry "message" "content")))
+
 (defun agent-dash-pi--session-info (file)
   "Return the session plist of Pi session FILE, or nil if it is not one."
-  ;; ponytail: reads only the first 64 KiB for header and first prompt.
-  (let* ((lines (agent-dash-file-lines file 65536))
-         (header (and lines (agent-dash-json-read (car lines))))
-         (prompt (seq-find (lambda (l) (string-search "\"role\":\"user\"" l)) (cdr lines))))
+  ;; ponytail: the first prompt is looked for in the first 256 KiB only.
+  (let* ((head (agent-dash-file-lines file (* 256 1024)))
+         (header (and head (agent-dash-json-read (car head)))))
     (when (equal (agent-dash-jget header "type") "session")
-      (let ((id (agent-dash-jget header "id")))
-        (list :id id :root (agent-dash-jget header "cwd")
-              :time (substring (or (agent-dash-jget header "timestamp") "") 0 16)
-              :title (if prompt
-                         (agent-dash-json-text
-                          (agent-dash-jget (agent-dash-json-read prompt) "message" "content"))
-                       "(empty)")
+      (let* ((id (agent-dash-jget header "id"))
+             (first (seq-some #'agent-dash-pi--user-entry (cdr head)))
+             (last (agent-dash-file-find-last file #'agent-dash-pi--user-entry))
+             (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
+        (list :id id :root (agent-dash-jget header "cwd") :file file
+              :first (and first (agent-dash-pi--entry-text first))
+              :last (and last (agent-dash-pi--entry-text last))
+              :time (or time (agent-dash-mtime file)) :exact (and time t)
+              :empty (not (or first last))
               :running (agent-dash-holder-alive-p (agent-dash-holder-dir 'pi id)))))))
 
 (defun agent-dash-pi--file (id)
@@ -389,9 +468,10 @@
       (setq entry (gethash (agent-dash-jget entry "parentId") by-id)))
     turns))
 
-(defun agent-dash-pi--blocks-text (content)
-  "Return the text of message CONTENT, a string or blocks."
-  (if (stringp content) content (agent-dash-pi--blocks content "text" "text")))
+(cl-defmethod agent-dash-backend-delete ((_ (eql pi)) session)
+  "Pi `agent-dash-backend-delete' for SESSION."
+  (agent-dash-delete-file (plist-get session :file) agent-dash-pi-sessions-directory
+                          (plist-get session :id)))
 
 (cl-defmethod agent-dash-backend-sessions ((_ (eql pi)) root)
   "Pi `agent-dash-backend-sessions' for ROOT."
@@ -411,7 +491,7 @@
                                    (mapcar #'agent-dash-pi--session-info
                                            (directory-files dir t "\\.jsonl\\'"))))
                             dirs))
-          (lambda (a b) (string> (plist-get a :time) (plist-get b :time))))))
+          (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
 
 (provide 'agent-dash-pi)
 ;;; agent-dash-pi.el ends here

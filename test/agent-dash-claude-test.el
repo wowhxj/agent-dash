@@ -116,15 +116,15 @@
               (agent-dash-send))
             (agent-dash-test-wait (lambda () (and (agent-dash-session-items session)
                                                   (eq (agent-dash-session-state session) 'idle))))
-            (should (equal (funcall transcript session) "You: hi\nClaude: Hello\n"))
+            (should (equal (funcall transcript session) "\nYou: hi\n\nClaude: Hello\n"))
             (kill-buffer (agent-dash-session-buffer session))
             (should (agent-dash-holder-alive-p dir))
             (let ((again (agent-dash-open 'claude temporary-file-directory sid)))
               (agent-dash-test-wait
-               (lambda () (equal (funcall transcript again) "You: hi\nClaude: Hello\n")))
+               (lambda () (equal (funcall transcript again) "\nYou: hi\n\nClaude: Hello\n")))
               ;; Let the rest of the log replay; nothing may appear twice.
               (accept-process-output nil 0.3)
-              (should (equal (funcall transcript again) "You: hi\nClaude: Hello\n"))
+              (should (equal (funcall transcript again) "\nYou: hi\n\nClaude: Hello\n"))
               (with-current-buffer (agent-dash-session-buffer again)
                 (cl-letf (((symbol-function 'yes-or-no-p) #'always))
                   (agent-dash-quit))))

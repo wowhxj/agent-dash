@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-input)
 (require 'markdown-mode)
 
 (defgroup agent-dash-ui nil "Chat buffer of `agent-dash'." :group (quote agent-dash))
@@ -18,11 +19,16 @@
   "Lines of tool output shown when a tool item is expanded."
   :type 'integer)
 
-(defface agent-dash-user-face '((t :inherit font-lock-keyword-face :weight bold))
-  "Face for the user label.")
+(defface agent-dash-user-face '((t :inherit highlight :weight bold :extend t))
+  "Face for a user turn, extended across the window.")
+(defface agent-dash-input-face
+  '((t :inherit widget-field :underline nil :extend t))
+  "Face for the editable composer.")
 (defface agent-dash-assistant-face
   '((t :inherit font-lock-function-name-face :weight bold))
   "Face for the assistant label.")
+(defface agent-dash-status-face '((t :inherit mode-line))
+  "Face for the compact agent activity indicator.")
 (defface agent-dash-process-face '((t :inherit shadow))
   "Face for tool and thinking lines.")
 (defface agent-dash-separator-face '((t :inherit shadow))
@@ -32,6 +38,9 @@
 (defvar-local agent-dash--transcript-end nil
   "Marker where the next timeline item goes; advances on insertion.")
 (defvar-local agent-dash--input-start nil "Marker at the composer start.")
+(defvar-local agent-dash--input-overlay nil "Overlay decorating the composer.")
+(defvar-local agent-dash--spinner-index 0 "Current activity animation frame.")
+(defvar-local agent-dash--spinner-timer nil "Timer while this chat is running.")
 (defvar-local agent-dash--history nil "Sent prompts, newest first.")
 (defvar-local agent-dash--history-index -1)
 (defvar-local agent-dash--history-draft nil)
@@ -63,24 +72,30 @@ The prompt history keeps the text as typed.")
     (font-lock-ensure)
     (buffer-string)))
 
+(defun agent-dash--backend-name (backend)
+  "Return the display name of BACKEND."
+  (if (eq backend 'dsh) "DSH" (capitalize (symbol-name backend))))
+
 (defun agent-dash--label (session)
   "Return the assistant label of SESSION."
-  (propertize (format "%s: " (capitalize (symbol-name
-                                          (agent-dash-session-backend session))))
+  (propertize (format "%s: " (agent-dash--backend-name
+                              (agent-dash-session-backend session)))
               'face 'agent-dash-assistant-face))
 
-(defun agent-dash--item-text (session item)
-  "Return the display string of timeline ITEM of SESSION."
+(defun agent-dash--item-body (session item)
+  "Return the display body of timeline ITEM of SESSION."
   (let ((folded (not (eq (plist-get item :folded) 'open))))
     (pcase (plist-get item :type)
       ('user
-       (concat (propertize "You: " 'face 'agent-dash-user-face)
-               (let* ((text (plist-get item :text))
-                      (cut (string-search agent-dash-reference-boundary text)))
-                 (if cut (substring text 0 cut) text))
-               (if (plist-get item :images)
-                   (format " [%d image(s)]" (length (plist-get item :images)))
-                 "")))
+       (propertize
+        (concat "\nYou: "
+                (let* ((text (plist-get item :text))
+                       (cut (string-search agent-dash-reference-boundary text)))
+                  (if cut (substring text 0 cut) text))
+                (if (plist-get item :images)
+                    (format " [%d image(s)]" (length (plist-get item :images)))
+                  "") "\n")
+        'face 'agent-dash-user-face))
       ('assistant
        (let ((thinking (plist-get item :thinking))
              (text (or (plist-get item :text) "")))
@@ -118,6 +133,52 @@ The prompt history keeps the text as typed.")
                    'face (pcase (plist-get item :level)
                            ('error 'error) ('warning 'warning) (_ 'shadow)))))))
 
+(defun agent-dash--process-p (item)
+  "Return non-nil when ITEM belongs in a turn's Process group."
+  (or (eq (plist-get item :type) 'tool)
+      (and (eq (plist-get item :type) 'assistant)
+           (or (plist-get item :process)
+               (and (string-blank-p (or (plist-get item :text) ""))
+                    (not (string-blank-p
+                          (or (plist-get item :thinking) ""))))))))
+
+(defun agent-dash--item-text (session item)
+  "Return SESSION's ITEM display string, with a foldable Process heading."
+  (let* ((group (and (plist-get item :process-group)
+                     (agent-dash-item session (plist-get item :process-group))))
+         (closed (and group (not (plist-get group :process-open))))
+         (body (agent-dash--item-body session item)))
+    (concat
+     (when (eq group item)
+       (propertize
+        (format "%s Process · %d steps\n"
+                (if closed "▸" "▾") (plist-get group :process-count))
+        'face 'agent-dash-process-face 'agent-dash-process-heading t
+        'help-echo "RET / TAB: expand or collapse this turn's process"))
+     (if closed (propertize body 'invisible 'agent-dash-process) body))))
+
+(defun agent-dash--render-process (session changed)
+  "Group SESSION's process items by user turn and redraw CHANGED items."
+  (let (groups group)
+    (dolist (item (agent-dash-session-items session))
+      (when (eq (plist-get item :type) 'user)
+        (when group (push (nreverse group) groups))
+        (setq group nil))
+      (when (agent-dash--process-p item) (push item group)))
+    (when group (push (nreverse group) groups))
+    (dolist (items (nreverse groups))
+      (let ((first (car items)) (count (length items)))
+        (dolist (item items)
+          (let ((redraw (or (eq item changed)
+                            (not (equal (plist-get item :process-group)
+                                        (plist-get first :id)))
+                            (and (eq item first)
+                                 (not (eql (plist-get item :process-count)
+                                           count))))))
+            (plist-put item :process-group (plist-get first :id))
+            (when (eq item first) (plist-put item :process-count count))
+            (when redraw (agent-dash--render session item))))))))
+
 (defun agent-dash--render (session item)
   "Insert or redraw timeline ITEM of SESSION in the current buffer."
   (let ((inhibit-read-only t)
@@ -134,6 +195,14 @@ The prompt history keeps the text as typed.")
       (unless (plist-get item :end)
         (insert "\n")
         (plist-put item :end (copy-marker (1- (point)) t)))
+      (put-text-property (plist-get item :end) (1+ (plist-get item :end))
+                         'invisible
+                         (and (plist-get item :process-group)
+                              (not (plist-get
+                                    (agent-dash-item
+                                     session (plist-get item :process-group))
+                                    :process-open))
+                              'agent-dash-process))
       (add-text-properties start (1+ (plist-get item :end))
                            (list 'read-only t 'front-sticky '(read-only)
                                  'agent-dash-item (plist-get item :id))))))
@@ -143,25 +212,207 @@ The prompt history keeps the text as typed.")
   (let ((buffer (agent-dash-session-buffer session)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when item (agent-dash--render session item))
+        (when item
+          (unless (agent-dash--process-p item)
+            (plist-put item :process-group nil)
+            (agent-dash--render session item))
+          (agent-dash--render-process session item))
+        (agent-dash--sync-spinner)
         (force-mode-line-update)))))
 
 (add-hook 'agent-dash-update-functions #'agent-dash--on-update)
 
+(defun agent-dash--stop-spinner ()
+  "Release this chat's activity timer."
+  (when (timerp agent-dash--spinner-timer)
+    (cancel-timer agent-dash--spinner-timer))
+  (setq agent-dash--spinner-timer nil))
+
+(defun agent-dash--sync-spinner ()
+  "Animate only running chats; redraws never call backends or touch drafts."
+  (if (and agent-dash--session
+           (eq (agent-dash-session-state agent-dash--session) 'running))
+      (unless agent-dash--spinner-timer
+        (let ((buffer (current-buffer)) timer)
+          (setq timer
+                (run-at-time
+                 0.15 0.15
+                 (lambda ()
+                   (if (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (if (and (eq timer agent-dash--spinner-timer)
+                                  (derived-mode-p 'agent-dash-mode)
+                                  agent-dash--session
+                                  (eq (agent-dash-session-state agent-dash--session)
+                                      'running))
+                             (progn
+                               (setq agent-dash--spinner-index
+                                     (mod (1+ agent-dash--spinner-index) 4))
+                               (force-mode-line-update t))
+                           (cancel-timer timer)
+                           (when (eq timer agent-dash--spinner-timer)
+                             (setq agent-dash--spinner-timer nil))))
+                     (cancel-timer timer)))))
+          (setq agent-dash--spinner-timer timer)))
+    (agent-dash--stop-spinner)))
+
+(defun agent-dash--install-status-line ()
+  "Install one compact status indicator in the ordinary mode-line info area."
+  (let ((status '(:eval (agent-dash--mode-line))))
+    ;; Remove the old process-slot indicator when hot loading.
+    (when (equal mode-line-process status) (setq-local mode-line-process nil))
+    (setq-local mode-line-misc-info
+                (cons status
+                      (cl-remove status
+                                 (if (listp mode-line-misc-info) mode-line-misc-info
+                                   (list mode-line-misc-info))
+                                 :test #'equal)))))
+
 (defun agent-dash--mode-line ()
-  "Return the mode-line status of this chat."
+  "Return compact activity, with detailed phase and actions in a tooltip."
   (when-let* ((s agent-dash--session))
-    (let* ((queue (agent-dash-session-queue s))
-           (q (+ (length (plist-get queue :steering))
-                 (length (plist-get queue :follow-up))))
-           (model (plist-get (agent-dash-session-meta s) :model))
-           (requests (length (agent-dash-session-requests s))))
-      (string-replace
-       "%" "%%"
-       (concat " " (symbol-name (agent-dash-session-state s))
-               (if (> q 0) (format " Q%d" q) "")
-               (if (> requests 0) (format " ?%d C-c C-a" requests) "")
-               (if model (format " · %s" model) ""))))))
+    (let* ((state (agent-dash-session-state s))
+           (running (eq state 'running))
+           (queue (agent-dash-session-queue s))
+           (steering (length (plist-get queue :steering)))
+           (follow-up (length (plist-get queue :follow-up)))
+           (phase (plist-get (agent-dash-session-meta s) :phase))
+           (requests (length (agent-dash-session-requests s)))
+           (name (agent-dash--backend-name (agent-dash-session-backend s)))
+           (status (cond ((eq state 'dead) "disconnected")
+                         ((> requests 0) "waiting")
+                         (running "thinking") (t "idle"))))
+      (propertize
+       (string-replace
+        "%" "%%"
+        (concat " " name " " status
+                (when running
+                  (format " %c" (aref "|/-\\" (mod agent-dash--spinner-index 4))))
+                (when (> (+ steering follow-up) 0)
+                  (format " [S%d F%d]" steering follow-up))
+                (when (> requests 0) (format " ?%d" requests))))
+       'face 'agent-dash-status-face
+       'help-echo
+       (concat name ": " (symbol-name state)
+               (when (and running phase) (concat " · " phase))
+               (when (> requests 0) "\nC-c C-a: answer pending requests")
+               (when (> (+ steering follow-up) 0)
+                 "\nS: steering; F: follow-up"))))))
+
+(defun agent-dash--format-tokens (value)
+  "Format known token VALUE compactly."
+  (cond ((>= value 1000000) (format "%.1fM" (/ value 1000000.0)))
+        ((>= value 1000) (format "%.1fk" (/ value 1000.0)))
+        (t (number-to-string value))))
+
+(defun agent-dash--stat-segments (session)
+  "Return SESSION's known statistics, highest priority first."
+  (let* ((meta (agent-dash-session-meta session))
+         (stats (plist-get meta :stats))
+         (usage (plist-get meta :context-usage))
+         (used (agent-dash-jget usage "tokens"))
+         (window (agent-dash-jget usage "contextWindow"))
+         (percent (agent-dash-jget usage "percent"))
+         (tokens (agent-dash-jget stats "tokens"))
+         (input (agent-dash-jget tokens "input"))
+         (read (agent-dash-jget tokens "cacheRead"))
+         (write (agent-dash-jget tokens "cacheWrite"))
+         (total (agent-dash-jget tokens "total"))
+         (cost (agent-dash-jget stats "cost"))
+         (prompts (agent-dash-jget stats "userMessages"))
+         (calls (agent-dash-jget stats "assistantMessages"))
+         (turns (agent-dash-jget stats "turns"))
+         (steps (agent-dash-jget stats "steps"))
+         (decode-ms (agent-dash-jget stats "decodeMs"))
+         (decode-tokens (agent-dash-jget stats "decodeTokens"))
+         (context (when (and (numberp used) (numberp window))
+                    (format "%s/%s%s" (agent-dash--format-tokens used)
+                            (agent-dash--format-tokens window)
+                            (if (numberp percent)
+                                (format " (%.0f%%)" percent) "")))))
+    (when (and context (numberp percent) (>= percent 80))
+      (setq context (propertize context 'face
+                                (if (>= percent 95) 'error 'warning))))
+    (delq nil
+          (list context
+                (when (and (numberp turns) (numberp steps) (> steps 0))
+                  (format "%d turns · %d steps" turns steps))
+                (when (and (numberp decode-ms) (> decode-ms 0)
+                           (numberp decode-tokens))
+                  (format "%.0f tok/s" (/ (* 1000.0 decode-tokens) decode-ms)))
+                (when (and (numberp prompts) (numberp calls))
+                  (format "%d prompts · %d calls" prompts calls))
+                (when (numberp total)
+                  (format "%s tok" (agent-dash--format-tokens total)))
+                (when (and (numberp input) (numberp read) (numberp write)
+                           (> (+ input read write) 0))
+                  (format "cache %.0f%%"
+                          (* 100.0 (/ (float read) (+ input read write)))))
+                (when (numberp cost) (format "$%.4f" cost))))))
+
+(defun agent-dash--header ()
+  "Align cached statistics left and model right, as in emacs-pi.
+Redisplay never issues requests.  Run state belongs only in the mode line."
+  (when-let* ((s agent-dash--session))
+    (let* ((meta (agent-dash-session-meta s))
+           (provider (plist-get meta :provider))
+           (model (or (plist-get meta :model) "model pending"))
+           (thinking (plist-get meta :thinking))
+           (short-model
+            (agent-dash--one-line
+             (string-join
+              (seq-filter #'stringp
+                          (list model thinking (plist-get meta :agent-preset)
+                                (plist-get meta :permission)))
+              " · ")
+             most-positive-fixnum))
+           (right (if (stringp provider)
+                      (format "(%s) %s" (agent-dash--one-line provider 100)
+                              short-model)
+                    short-model))
+           (segments (agent-dash--stat-segments s))
+           (help (concat (string-join segments " · ") "\n" right
+                         "\nContext: current usage / model window."
+                         "\nTokens and cost: session totals; estimate, not a bill."
+                         "\nCache: cache-read / (input + cache-read + cache-write)."))
+           (width (max 1 (- (window-total-width) 2))))
+      ;; Keep context and model identity as the window narrows.
+      (while (and (cdr segments)
+                  (> (+ (string-width (string-join segments " · "))
+                        (string-width right) 2) width))
+        (setq segments (butlast segments)))
+      (when (> (+ (string-width (or (car segments) ""))
+                  (string-width right) 2) width)
+        (setq right short-model))
+      (let ((budget (max 0 (- width (min (string-width (or (car segments) ""))
+                                         (/ width 2)) 2))))
+        (setq right (if (> budget 0)
+                        (truncate-string-to-width right budget nil nil "…") "")))
+      (let* ((budget (max 0 (- width (string-width right) 2)))
+             (left (if (> budget 0)
+                       (truncate-string-to-width
+                        (string-join segments " · ") budget nil nil "…") ""))
+             (line (concat " " (string-replace "%" "%%" left) " "
+                           (propertize " " 'display
+                                       `(space :align-to
+                                               (- right ,(1+ (string-width right)))))
+                           (string-replace "%" "%%" right))))
+        (propertize line 'help-echo help)))))
+
+(defun agent-dash--pinned-prompt ()
+  "Return the latest user prompt, pinned above the conversation."
+  (when-let* ((s agent-dash--session)
+              (item (seq-find (lambda (i) (eq (plist-get i :type) 'user))
+                              (reverse (agent-dash-session-items s)))))
+    (let* ((text (plist-get item :text))
+           (cut (string-search agent-dash-reference-boundary text)))
+      (propertize
+       (string-replace
+        "%" "%%"
+        (concat " You: "
+                (agent-dash--one-line (if cut (substring text 0 cut) text)
+                                      (max 10 (- (window-body-width) 8)))))
+       'face 'agent-dash-input-face))))
 
 ;;;; Buffer
 
@@ -170,6 +421,7 @@ The prompt history keeps the text as typed.")
 (defvar agent-dash-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'agent-dash-ret)
+    (define-key map (kbd "i") #'agent-dash-insert-or-focus)
     (define-key map (kbd "<S-return>") #'newline)
     (define-key map (kbd "TAB") #'agent-dash-tab)
     (define-key map (kbd "M-p") #'agent-dash-previous-prompt)
@@ -189,11 +441,15 @@ The prompt history keeps the text as typed.")
 (define-derived-mode agent-dash-mode fundamental-mode "Agent"
   "Chat with an agent.  The composer is below the line.
 \\{agent-dash-mode-map}"
-  (setq-local mode-line-process '(:eval (agent-dash--mode-line)))
+  (agent-dash--install-status-line)
+  (setq-local tab-line-format '(:eval (agent-dash--header)))
+  (setq-local header-line-format '(:eval (agent-dash--pinned-prompt)))
+  (add-to-invisibility-spec 'agent-dash-process)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   (add-hook 'completion-at-point-functions #'agent-dash--file-capf nil t)
-  (add-hook 'kill-buffer-hook #'agent-dash--on-kill nil t))
+  (add-hook 'kill-buffer-hook #'agent-dash--on-kill nil t)
+  (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t))
 
 (defun agent-dash--file-capf ()
   "Complete an @file reference in the composer, relative to the chat root."
@@ -213,17 +469,71 @@ The prompt history keeps the text as typed.")
       (setq agent-dash--session session
             default-directory (agent-dash-session-root session))
       (let ((inhibit-read-only t))
-        (insert (propertize (concat (make-string 40 ?─) "\n")
-                            'face 'agent-dash-separator-face 'read-only t
-                            'rear-nonsticky t)))
+        (insert (propertize "\n" 'read-only t 'rear-nonsticky t)))
       (setq agent-dash--transcript-end (copy-marker (point-min) t)
-            agent-dash--input-start (copy-marker (point-max))))
+            agent-dash--input-start (copy-marker (point-max)))
+      (agent-dash--decorate-input))
     (setf (agent-dash-session-buffer session) buffer)
     (push session agent-dash--sessions)
     buffer))
 
+(defun agent-dash--decorate-input ()
+  "Decorate the composer without changing its text or prompt history."
+  (when (overlayp agent-dash--input-overlay)
+    (delete-overlay agent-dash--input-overlay))
+  (setq agent-dash--input-overlay
+        (make-overlay agent-dash--input-start (point-max) nil nil t))
+  (overlay-put agent-dash--input-overlay 'face 'agent-dash-input-face)
+  (overlay-put agent-dash--input-overlay 'before-string
+               (propertize "You> " 'face 'agent-dash-input-face))
+  ;; Empty composers have a zero-length overlay: :extend alone cannot
+  ;; paint the area after the virtual prompt.  Fill to the window edge
+  ;; with display-only space, never padding the draft with real text.
+  ;; Anchor the cursor at the start of that space, not after the fill
+  ;; (or before the virtual prompt when the composer is empty).
+  (overlay-put agent-dash--input-overlay 'after-string
+               (propertize " " 'face 'agent-dash-input-face 'cursor t
+                           'display '(space :align-to right))))
+
+(defun agent-dash-refresh-chat ()
+  "Rebuild this chat's presentation without restarting its agent or losing drafts."
+  (interactive)
+  (unless agent-dash--session (user-error "Not an agent-dash chat"))
+  (let ((draft (agent-dash--input))
+        (offset (and (agent-dash--in-input-p)
+                     (- (point) agent-dash--input-start)))
+        (position (point))
+        (inhibit-read-only t)
+        (buffer-undo-list t))
+    (when (overlayp agent-dash--input-overlay)
+      (delete-overlay agent-dash--input-overlay))
+    (dolist (item (agent-dash-session-items agent-dash--session))
+      (dolist (key '(:start :end))
+        (when (markerp (plist-get item key)) (set-marker (plist-get item key) nil))
+        (plist-put item key nil))
+      (plist-put item :process-group nil))
+    (erase-buffer)
+    (insert (propertize "\n" 'read-only t 'rear-nonsticky t))
+    (setq agent-dash--transcript-end (copy-marker (point-min) t)
+          agent-dash--input-start (copy-marker (point-max)))
+    (setq-local tab-line-format '(:eval (agent-dash--header)))
+    (setq-local header-line-format '(:eval (agent-dash--pinned-prompt)))
+    (agent-dash--install-status-line)
+    (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t)
+    (add-to-invisibility-spec 'agent-dash-process)
+    (dolist (item (agent-dash-session-items agent-dash--session))
+      (agent-dash--render agent-dash--session item))
+    (agent-dash--render-process agent-dash--session nil)
+    (agent-dash--set-input draft)
+    (agent-dash--decorate-input)
+    (goto-char (if offset (+ agent-dash--input-start offset)
+                 (min position (point-max)))))
+  (agent-dash--sync-spinner)
+  (force-mode-line-update))
+
 (defun agent-dash--on-kill ()
   "Detach from the agent when its chat buffer dies."
+  (agent-dash--stop-spinner)
   (when-let* ((s agent-dash--session))
     (setq agent-dash--sessions (delq s agent-dash--sessions))
     (unless agent-dash--quitting
@@ -260,17 +570,19 @@ Return the session."
   (let ((text (string-trim (agent-dash--input)))
         (s agent-dash--session))
     (when (string-empty-p text) (user-error "Nothing to send"))
-    (setq mode (or mode (if (eq (agent-dash-session-state s) 'running)
-                            'follow-up 'prompt)))
-    ;; Clear only after the backend accepted the write; on error the
-    ;; draft stays.
-    (agent-dash-backend-send (agent-dash-session-backend s) s
-                             (seq-reduce (lambda (acc f) (funcall f acc))
-                                         agent-dash-prompt-filter-functions text)
-                             nil mode)
-    (push text agent-dash--history)
-    (setq agent-dash--history-index -1 agent-dash--history-draft nil)
-    (agent-dash--set-input "")))
+    (unless (agent-dash-input-dispatch text)
+      (setq mode (or mode (if (eq (agent-dash-session-state s) 'running)
+                              'follow-up 'prompt)))
+      ;; Clear only after the backend accepted the write; errors keep the draft.
+      (let ((sent (seq-reduce (lambda (acc f) (funcall f acc))
+                              agent-dash-prompt-filter-functions text))
+            (backend (agent-dash-session-backend s)))
+        (if (string-prefix-p "/" text)
+            (agent-dash-backend-command backend s sent mode)
+          (agent-dash-backend-send backend s sent nil mode)))
+      (push text agent-dash--history)
+      (setq agent-dash--history-index -1 agent-dash--history-draft nil)
+      (agent-dash--set-input ""))))
 
 (defun agent-dash-send ()
   "Send the draft; while the agent runs it queues as a follow-up."
@@ -294,7 +606,9 @@ Return the session."
 (defun agent-dash-tab ()
   "Toggle the item at point, or complete in the composer."
   (interactive)
-  (if (agent-dash--in-input-p) (completion-at-point) (agent-dash-toggle)))
+  (if (agent-dash--in-input-p)
+      (agent-dash-complete-input current-prefix-arg)
+    (agent-dash-toggle)))
 
 (defun agent-dash-toggle ()
   "Fold or unfold the tool or thinking item at point."
@@ -302,10 +616,18 @@ Return the session."
   (let* ((id (get-text-property (point) 'agent-dash-item))
          (item (and id (agent-dash-item agent-dash--session id))))
     (unless item (user-error "No item here"))
-    (plist-put item :folded (if (eq (plist-get item :folded) 'open) nil 'open))
-    (let ((pos (point)))
-      (agent-dash--render agent-dash--session item)
-      (goto-char (min pos (plist-get item :end))))))
+    (if (get-text-property (point) 'agent-dash-process-heading)
+        (let ((group (agent-dash-item
+                      agent-dash--session (plist-get item :process-group))))
+          (plist-put group :process-open (not (plist-get group :process-open)))
+          (dolist (member (agent-dash-session-items agent-dash--session))
+            (when (equal (plist-get member :process-group) (plist-get group :id))
+              (agent-dash--render agent-dash--session member)))
+          (goto-char (plist-get item :start)))
+      (plist-put item :folded (if (eq (plist-get item :folded) 'open) nil 'open))
+      (let ((pos (point)))
+        (agent-dash--render agent-dash--session item)
+        (goto-char (min pos (plist-get item :end)))))))
 
 (defun agent-dash--history-move (delta)
   "Move DELTA steps through the prompt history."
@@ -330,6 +652,13 @@ Return the session."
   (interactive)
   (agent-dash--history-move -1))
 
+(defun agent-dash-insert-or-focus (count)
+  "Insert COUNT copies of i in the composer, or focus it from the transcript."
+  (interactive "p")
+  (if (agent-dash--in-input-p)
+      (self-insert-command count)
+    (agent-dash-focus-input)))
+
 (defun agent-dash-focus-input ()
   "Move point to the end of the composer."
   (interactive)
@@ -345,7 +674,8 @@ Return the session."
                                nil t))
     (car agent-dash-backends)))
 
-;;;###autoload
+;; Autoload the main file, which loads every backend, not just this one.
+;;;###autoload (autoload 'agent-dash "agent-dash" "Start a new agent chat." t)
 (defun agent-dash (backend root)
   "Start a new chat with BACKEND in directory ROOT."
   (interactive

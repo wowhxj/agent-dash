@@ -37,7 +37,7 @@
 (defvar agent-dash-fake-quit 'stop "The fake backend's :quit capability.")
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql fake)))
-  (list :quit agent-dash-fake-quit :steer t :images nil :models nil))
+  (list :quit agent-dash-fake-quit :steer t :images nil :models nil :delete t))
 
 (cl-defmethod agent-dash-backend-start ((_ (eql fake)) session &optional resume-id)
   (push (list 'start (agent-dash-session-id session) resume-id) agent-dash-fake-calls))
@@ -64,6 +64,9 @@
 
 (cl-defmethod agent-dash-backend-transcript ((_ (eql fake)) id)
   (list (cons 'user (format "question of %s" id)) (cons 'assistant "answer")))
+
+(cl-defmethod agent-dash-backend-delete ((_ (eql fake)) session)
+  (push (list 'delete (plist-get session :id)) agent-dash-fake-calls))
 
 (provide 'agent-dash-fake)
 ;;; agent-dash-fake.el ends here

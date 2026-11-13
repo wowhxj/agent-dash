@@ -42,7 +42,10 @@
     (should (eq (plist-get (agent-dash-item s "c1") :status) 'success))
     (should (equal (plist-get (agent-dash-item s "s7") :text) "turn cancelled"))
     (should (eq (agent-dash-session-state s) 'idle))
-    (should (equal (agent-dash-session-meta s) '(:title "T" :model "ds")))))
+    (should (equal (plist-get (agent-dash-session-meta s) :title) "T"))
+    (should (equal (plist-get (agent-dash-session-meta s) :model) "ds"))
+    (should-not (agent-dash-jget (plist-get (agent-dash-session-meta s) :stats)
+                                 "tokens" "total"))))
 
 (ert-deftest agent-dash-dsh-test-interactions ()
   (let* ((agent-dash-dsh--session-list nil)

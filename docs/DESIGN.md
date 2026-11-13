@@ -63,9 +63,12 @@ ponytail：`assistant` 用整段快照而不是 delta。好处是 reducer 无状
 | `agent-dash-backend-detach (backend session)` | 是 | kill-buffer 时调用：只断开客户端 |
 | `agent-dash-backend-respond (backend session request answer)` | 否 | 回答 `request` |
 | `agent-dash-backend-models (backend session)` / `-set-model` | 否 | 模型列表与切换 |
-| `agent-dash-backend-sessions (backend root)` | 否 | hub 用：历史会话列表 `(:id :title :root :time :running)` |
+| `agent-dash-backend-sessions (backend root)` | 否 | hub 用：会话 plist，字段 `:id :root :first :title :last :time :exact :running :file :empty`（见 core 中的文档串） |
+| `agent-dash-backend-delete (backend session)` | 否 | 永久删除；能力 `:delete` 声明支持（Claude、Pi） |
 | `agent-dash-backend-transcript (backend id)` | 否 | hub 详情与 @ 引用：`((user . TEXT) (assistant . TEXT) …)` |
 | `agent-dash-backend-capabilities (backend)` | 是 | plist：`:quit stop\|detach`、`:steer`、`:images`、`:models` |
+| `agent-dash-backend-commands (backend session)` | 否 | 后端实际公布的命令/skill，`((NAME . DESCRIPTION) …)` |
+| `agent-dash-backend-command (backend session text mode)` | 否 | 默认沿正常发送协议执行；Pi `/compact` 转对应 RPC，DSH 区分 Host 命令与注册 skill |
 
 ## 4. 通用 holder（D1）
 
@@ -151,8 +154,12 @@ stdout 必须是管道而不是普通文件：Hermes ACP（Python asyncio）遇�
 | `model/selection`、`request/header`、`session/title`、`agent-preset/selected`、`working-directory/change` | `meta` |
 | `approval/request` | `request :kind permission` |
 | `user-questions/request` | `request :kind questions` |
-| projection `queue` / `tokenUsage` / `contextPressure` | `queue` / `meta` |
+| projection `contextPressure` / `sessionStats` / `tokenUsage` / `modelSelection` / `agentPreset` / `permissions` | 归一化进 `meta`，供共享状态栏读取 |
 | `snapshot` | 按记录逐条回放成上面的事件 |
+
+DSH 的 `session/follow` 快照提供初始投影；同一 websocket 同时订阅 `session/control`，处理 baseline、批量 changes 和旧版 key/value 替换帧，只应用当前 sid。按字段记录序号，忽略旧替换；未出现的键保留旧值，显式 null 清空。模型 selection 事件也经过同一缓存，避免后续统计更新覆盖新模型。
+
+指标来自 Host，而不是数聊天消息猜测：上下文优先 `projectedTokens`，否则 `pressureTokens`；轮步取 `sessionStats.turns/steps`，速度为 `1000 * decodeTokens / decodeMs`（分母须大于 0）。总 token 为 `uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens`，缓存比例为 `cacheReadTokens / (uncachedInputTokens + cacheReadTokens + cacheWriteTokens)`；计算所需桶缺失时不显示相应总量/比例，不把已有缓存桶再加进 input 总量，不推算费用。右侧从 `modelSelection.next` 读取 provider/model/reasoningEffort，另显示 agentPreset 和 permissions.currentValue。统计和右侧扩展字段仍由五后端共用的 UI 格式化。
 
 ### 5.4 Codex（`codex app-server`，JSON-RPC 2.0，经 holder）
 
@@ -194,15 +201,28 @@ stdout 必须是管道而不是普通文件：Hermes ACP（Python asyncio）遇�
 
 ## 6. 界面（以 emacs-pi DESIGN §7、§9、§11 为蓝本）
 
-- 历史区只读，底部是输入区。`RET` / `C-c C-c` 发送（运行中发送即 follow-up），`S-RET` 换行，`C-c C-s` steer，`C-c C-k` 停止，`C-c C-q` 退出（按 `:quit` 语义），`M-p` / `M-n` 浏览输入历史，`C-c C-i` 聚焦输入框，`C-c C-b` 切换聊天，`C-c C-r` 恢复历史会话，`TAB` 在过程行上折叠/展开。
-- 工具和 thinking 默认折叠成一行。
-- mode-line 显示：`后端:项目 · idle/running · 队列计数 · 模型`。
+- 历史区只读，底部是输入区。`RET` / `C-c C-c` 发送（运行中发送即 follow-up），`S-RET` 换行，`C-c C-s` steer，`C-c C-k` 停止，`C-c C-q` 退出（按 `:quit` 语义），`M-p` / `M-n` 浏览输入历史，非输入区按 `i` 或任意位置 `C-c C-i` 聚焦输入框末尾（输入区内 `i` 保持普通字符输入与数字前缀行为），`C-c C-b` 切换聊天，`C-c C-r` 恢复历史会话，`TAB` 在过程行上折叠/展开。
+- 五个后端共用同一套 UI 布局与交互，不按后端复制界面。用户回合以 highlight face 全宽高亮；底部 `You>` 通过 overlay 装饰输入区，不进入发送内容或历史。输入 face 与 emacs-pi 一致：继承 widget-field 背景、明确 `:underline nil`、`:extend t`，不硬编码主题颜色。输入 overlay 的 after-string 用 display-only stretch space 填充到窗口右边缘，保证空草稿和末行也铺满背景；填充不进入草稿、发送内容或历史。填充首字符必须带 `cursor t`，将光标锚定在提示符/草稿后，而非虚拟提示符开头或窗口右边缘。header-line 置顶最近一条用户消息。
+- 工具、纯 thinking 消息与 Pi 带 toolCall 的中间消息按用户回合收进默认折叠的 `Process · N steps`。标题 `RET`/`TAB` 控制整组，展开后仍可单独折叠工具输出；最终答复不隐藏。有正文的最终消息，其 thinking 仍单独折叠。
+- tab-line 左对齐显示已知统计，右边缘对齐显示 `(provider) 模型 · 思考等级`，并在后端提供时追加 Agent 预设、权限模式，对齐锚点与 emacs-pi 一致。窄窗口先去掉低优先级统计，再去掉 provider，必要时截断；完整信息保留在 help-echo。Pi 统计含 context、token、prompt/call 数、缓存读取比例和预估费用（非账单）；其他后端缺失的数据不虚构。实际 RPC `get_session_stats` 的 `contextUsage` 提供上下文；附着后和 `agent_settled` 时刷新，重绘不请求数据。
+- 五后端共用精简 mode-line：`Pi thinking |` / `Claude idle` / `DSH waiting ?1` 等。活动指示器与 emacs-pi 一样放在普通 `mode-line-misc-info` 区，不占 `mode-line-process`、不重复模型信息。运行中每 150ms 轮换 `|/-\`，只重绘状态、不请求后端、不改草稿；空闲、断开、关闭 buffer 或切换 major mode 时清理 timer。非空队列显示 `[S1 F2]`、待处理请求显示 `?N`，具体阶段（如 `waiting for model` / `responding`）与操作键放在 tooltip。重复热载不会增加 indicator 或 timer；`agent-dash-refresh-chat` 可无损重建显示，保留连接、草稿和输入区光标位置。不宣称与旧客户端完全等价：图片粘贴、队列编辑等仍待迁移。
 - 草稿与历史分开存放：后台输出不能修改输入区。
 
-## 7. hub
+### 6.1 输入补全
 
-`agent-dash-hub` 只调用后端接口里的 `sessions` / `transcript`，不写任何按后端分支的代码。单个来源出错时，错误显示在 header-line，其他来源照常列出。@session 引用通过 UI 的 `agent-dash-prompt-filter-functions` 在发送前展开；UI 在显示 user 消息时截掉 `agent-dash-reference-boundary` 之后附加的上下文。
+`agent-dash-input.el` 为五后端共用输入层：`TAB` 在 `/`、`@file`、`@session`、`@dash` 后调用标准 `completing-read`，保留 Vertico UI，在 picker 内可选启用 Orderless，不改全局 completion 配置。`@session` 限当前 Agent（跨项目），`@dash` 使用全 Agent Hub 清单，显示/匹配摘要、末句、项目、日期和完整 ID；同名会话不混淆。选中后生成已有 `agent-dash:` 引用格式，发送过滤器负责按原预算展开。目录读取不请求模型。替换范围用 marker 跟踪后台输出，取消或草稿被改动时不覆盖输入。
+
+`/` 合并本地命令与后端真实目录，按名称去重，本地命令优先；`C-u TAB` 刷新目录。客户端 `/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`（及支持时的 `/model`）不发给模型，且不忽略多余参数。Pi 用 `get_commands`，Claude 存 init.slash_commands（热载可从原 holder 日志恢复），DSH 用 commands/list + skills/list，Hermes 存 available_commands_update；Codex 未暴露 CLI 斜杠菜单，不虚构。DSH 只有已验证注册的 skill 会作为 prompt 提交，Host 命令走 commands/execute，失败保留草稿、成功显示返回文本。
+
+## 7. hub、摘要、搜索（复刻 ashub）
+
+- `agent-dash-hub.el`：只调用后端接口（`sessions` / `transcript` / `delete`），没有按后端分支的代码。所有来源共用一份会话清单，逐个来源用定时器读取，header 显示扫描进度和失败的来源。分组、筛选、transient 菜单（`N` / `f` / `a` / `?`）、详情、删除标记、项目重定向（`agent-dash-hub-project-relocations`）、诊断，键位与 ashub 相同。
+- `agent-dash-summary.el`：主入口按默认值为 t 的 `agent-dash-summary-enable` 启动 `agent-dash-summary-mode`。加载前设为 nil 可关闭自动启动（use-package 放在 `:init`）；运行时用 `(agent-dash-summary-mode -1)` 停止调度器。会话关闭并稳定 300 秒后才摘要，新任务通常至少间隔 60 秒，最新的会话优先。长对话会分段请求再汇总，该间隔不是单次模型调用或费用上限。内容指纹不变就不重复请求；失败后指数退避，401/403 或 gptel 缺失时整体暂停。gptel 为可选依赖，使用其默认后端/模型发送用户与助手对话（不含工具输出，但仍可能含隐私）。缓存文件为 `agent-dash-directory/summaries.eld`，只存摘要与调度元数据，不持久化完整 transcript。
+- 摘要导入：启动时若已加载 `ashub-summary` 且存在 `*ashub*` buffer，读取该 Hub 的会话清单与摘要访问器，不逆解其磁盘缓存键、不调用模型。也可手动运行 `agent-dash-summary-import-ashub`。按 agent/id 匹配，仅填充本地尚无摘要的条目；源条目 checked-stamp 与 ashub 当前 stamp 一致时，首次注册本地会话采用其 stamp，否则保留原文并显示待更新。导入不会覆盖已有摘要；后续更新可能调用模型。两套摘要模式同时运行可能重复工作和计费，不自动停用旧 ashub 调度器。
+- Hub 交互：`N` / `f` / `a` / `?` 使用 transient，新建与筛选组织方式对齐 ashub。详情为助手左、用户右的气泡，逐条带复制按钮；`m` 折叠元数据、`C-c C-w` 复制原始对话。详情缓存对话，`g` 只重新排版，重新打开才重新获取。
+- `agent-dash-search.el`：分两轮。第一轮逐批抽取逐字证据，证据必须能在输入原文中找到，否则拒绝；第二轮只依据这些证据回答，引用必须覆盖全部来源编号。
+- 各来源数据的限制：DSH 的 `session/list` 不提供首末句，后端从 bridge 文件同目录下 `storages/session_projcache/sessions/<id>.json` 的 `record.rows.turnOutline` 读取版本 2 的用户 prompt，过滤空白及非字符串值。缓存缺失或版本不支持时返回 nil；它是 Host 维护的投影，可能滞后或截断，不代表实时完整 transcript。Codex 线程的 rollout 文件已删除时没有末句；Hermes 只能列出经 ACP 创建的会话。
 
 ## 8. 不做（本版）
 
-TRAMP、Windows、分支树 UI、fork / clone、队列逐条编辑（mode-line 只显示队列计数）、会话删除、图片附件与智能粘贴（接口已留 `images` 参数）、gptel 摘要、DSH 模型切换。
+TRAMP、Windows、分支树 UI、fork / clone、队列逐条编辑（mode-line 只显示队列计数）、图片附件与智能粘贴（接口已留 `images` 参数）、DSH 模型切换。

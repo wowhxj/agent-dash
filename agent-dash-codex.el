@@ -271,14 +271,35 @@ Return (ITEM-ID . WHOLE-TEXT)."
   (agent-dash-set-data session :model model)
   (agent-dash-emit session (list :type 'meta :model model)))
 
+(defconst agent-dash-codex--injected
+  "\\`\\(?:<environment_context>\\|<user_instructions>\\|# AGENTS\\.md\\)"
+  "Start of context Codex injects as a user message.")
+
+(defun agent-dash-codex--last-prompt (file)
+  "Return (TEXT . TIMESTAMP) of the latest user prompt in rollout FILE, or nil."
+  (when (and (stringp file) (file-readable-p file))
+    (agent-dash-file-find-last
+     file
+     (lambda (line)
+       (when (string-search "\"role\":\"user\"" line)
+         (let* ((record (agent-dash-json-read line))
+                (text (string-trim
+                       (mapconcat (lambda (c) (or (agent-dash-jget c "text") ""))
+                                  (agent-dash-jget record "payload" "content") ""))))
+           (unless (or (string-empty-p text) (string-match-p agent-dash-codex--injected text))
+             (cons text (agent-dash-jget record "timestamp")))))))))
+
 (cl-defmethod agent-dash-backend-sessions ((_ (eql codex)) root)
   "Codex `agent-dash-backend-sessions' for ROOT."
   (mapcar (lambda (thread)
-            (let ((id (agent-dash-jget thread "id")))
-              (list :id id :root (agent-dash-jget thread "cwd")
-                    :title (or (agent-dash-jget thread "name") (agent-dash-jget thread "preview"))
-                    :time (format-time-string "%Y-%m-%dT%H:%M"
-                                              (or (agent-dash-jget thread "updatedAt") 0))
+            (let* ((id (agent-dash-jget thread "id"))
+                   (file (agent-dash-jget thread "path"))
+                   (last (agent-dash-codex--last-prompt file))
+                   (time (agent-dash-iso-seconds (cdr last))))
+              (list :id id :root (agent-dash-jget thread "cwd") :file file
+                    :first (agent-dash-jget thread "preview") :title (agent-dash-jget thread "name")
+                    :last (car last)
+                    :time (or time (agent-dash-jget thread "updatedAt")) :exact (and time t)
                     :running (and (agent-dash-holder-find 'codex id) t))))
           (agent-dash-jget (agent-dash-holder-oneshot
                             (agent-dash-codex--command)

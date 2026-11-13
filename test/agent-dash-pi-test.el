@@ -104,7 +104,7 @@
          (lambda () (and (eq (agent-dash-session-state session) 'idle)
                          (plist-get (agent-dash-item session "a5") :final))))
         (should (equal (buffer-substring-no-properties (point-min) agent-dash--transcript-end)
-                       "You: old\nYou: hello 你好\nPi: hi!\n"))
+                       "\nYou: old\n\n\nYou: hello 你好\n\nPi: hi!\n"))
         ;; Killing the buffer only detaches; resuming reattaches the same agent.
         (let ((pid (agent-dash-holder-pid dir)))
           (kill-buffer)

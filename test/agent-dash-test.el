@@ -59,7 +59,7 @@
    (agent-dash-emit session '(:type assistant :id "a1" :text "He"))
    (agent-dash-emit session '(:type assistant :id "a1" :text "Hello"))
    (agent-dash-emit session '(:type assistant :id "a1" :text "Hello!" :final t))
-   (should (equal (agent-dash-test-transcript) "You: hi\nFake: Hello!\n"))
+   (should (equal (agent-dash-test-transcript) "\nYou: hi\n\nFake: Hello!\n"))
    (should (equal (agent-dash--input) "draft"))
    (should (= (point) (point-max)))))
 
@@ -67,7 +67,7 @@
   (agent-dash-test-with-chat
    (agent-dash-emit session '(:type user :id "u1" :text "hi"))
    (agent-dash-emit session '(:type user :id "u1" :text "hi"))
-   (should (equal (agent-dash-test-transcript) "You: hi\n"))
+   (should (equal (agent-dash-test-transcript) "\nYou: hi\n\n"))
    (should (= 1 (length (agent-dash-session-items session))))))
 
 (ert-deftest agent-dash-test-tool-folds ()
@@ -75,16 +75,21 @@
    (agent-dash-emit session '(:type tool :id "t1" :name "bash" :args "ls"
                                     :status running))
    (agent-dash-emit session '(:type assistant :id "a1" :text "done" :final t))
-   (should (equal (agent-dash-test-transcript) "… bash  ls\nFake: done\n"))
+   (should (equal (agent-dash-test-transcript)
+                  "▸ Process · 1 steps\n… bash  ls\nFake: done\n"))
    (agent-dash-emit session '(:type tool :id "t1" :status success
                                     :output "a\nb"))
-   (should (equal (agent-dash-test-transcript) "✓ bash  ls\nFake: done\n"))
+   (should (equal (agent-dash-test-transcript)
+                  "▸ Process · 1 steps\n✓ bash  ls\nFake: done\n"))
    (goto-char (point-min))
    (agent-dash-toggle)
-   (should (equal (agent-dash-test-transcript)
-                  "✓ bash  ls\n    a\n    b\nFake: done\n"))
+   (forward-line 1)
    (agent-dash-toggle)
-   (should (equal (agent-dash-test-transcript) "✓ bash  ls\nFake: done\n"))))
+   (should (equal (agent-dash-test-transcript)
+                  "▾ Process · 1 steps\n✓ bash  ls\n    a\n    b\nFake: done\n"))
+   (agent-dash-toggle)
+   (should (equal (agent-dash-test-transcript)
+                  "▾ Process · 1 steps\n✓ bash  ls\nFake: done\n"))))
 
 (ert-deftest agent-dash-test-thinking-folds ()
   (agent-dash-test-with-chat
@@ -106,7 +111,7 @@
    (agent-dash-emit session '(:type queue :steering ("a") :follow-up ("b")))
    (agent-dash-emit session '(:type meta :model "m1"))
    (agent-dash-emit session '(:type request :id "r1" :kind confirm :title "Ok?"))
-   (should (equal (agent-dash--mode-line) " idle Q2 ?1 C-c C-a · m1"))))
+   (should (equal (agent-dash--mode-line) " Fake waiting [S1 F1] ?1"))))
 
 (ert-deftest agent-dash-test-prompt-history ()
   (agent-dash-test-with-chat
@@ -157,6 +162,30 @@
           (agent-dash-quit)))
       (should-not asked)
       (should (equal (car agent-dash-fake-calls) '(quit))))))
+
+(ert-deftest agent-dash-test-autoloads-load-whole-package ()
+  "Package autoloads must load agent-dash.el, which requires every backend."
+  (let* ((source (file-name-directory (locate-library "agent-dash")))
+         (dir (make-temp-file "agent-dash-loaddefs" t))
+         (file (expand-file-name "agent-dash-autoloads.el" dir)))
+    (unwind-protect
+        (progn
+          (dolist (el (directory-files source t "\\`agent-dash.*\\.el\\'"))
+            (copy-file el (file-name-as-directory dir)))
+          (loaddefs-generate dir file)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (dolist (command '("agent-dash" "agent-dash-hub"))
+              (goto-char (point-min))
+              (should (re-search-forward
+                       (format "(autoload '%s \"\\([^\"]+\\)\"" (regexp-quote command)) nil t))
+              (should (equal (match-string 1) "agent-dash")))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-dash-test-tests-run-without-summaries ()
+  "The test run must not summarize real sessions through gptel."
+  (should-not agent-dash-summary-enable)
+  (should-not agent-dash-summary-mode))
 
 (provide 'agent-dash-test)
 ;;; agent-dash-test.el ends here

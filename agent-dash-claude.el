@@ -32,7 +32,7 @@
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql claude)))
   "Claude implementation of `agent-dash-backend-capabilities'."
-  (list :quit 'stop :steer t :images t :models t))
+  (list :quit 'stop :steer t :images t :models t :delete t))
 
 (defun agent-dash-claude--transcript (root id)
   "Return the transcript file of Claude session ID under ROOT."
@@ -200,8 +200,12 @@ CALLBACK, if non-nil, receives the response."
       (pcase (agent-dash-jget e "type")
         ("system"
          (pcase (agent-dash-jget e "subtype")
-           ("init" (agent-dash-emit session (list :type 'meta :model (agent-dash-jget e "model")
-                                                  :status (agent-dash-jget e "permissionMode"))))
+           ("init"
+            (agent-dash-set-data session :command-catalog
+                                 (agent-dash-command-entries
+                                  (agent-dash-jget e "slash_commands")))
+            (agent-dash-emit session (list :type 'meta :model (agent-dash-jget e "model")
+                                           :status (agent-dash-jget e "permissionMode"))))
            ("status" (when-let* ((mode (agent-dash-jget e "permissionMode")))
                        (agent-dash-emit session (list :type 'meta :status mode))))))
         ("stream_event" (agent-dash-claude--stream session (agent-dash-jget e "event")))
@@ -260,6 +264,27 @@ CALLBACK, if non-nil, receives the response."
                                                       (agent-dash-jget e "code")))))
         ;; rate_limit_event, system hooks and thinking_tokens: not shown.
         (_ nil)))))
+
+(cl-defmethod agent-dash-backend-commands ((_ (eql claude)) session)
+  "Return SESSION's command catalog advertised by Claude initialization.
+Recover the startup record for sessions opened before this feature loaded."
+  (or (agent-dash-data session :command-catalog)
+      (when-let* ((directory (agent-dash-data session :holder))
+                  (file (expand-file-name "out.jsonl" directory))
+                  (_ (file-readable-p file)))
+        (agent-dash-set-data
+         session :command-catalog
+         (seq-some
+          (lambda (line)
+            (when (string-search "\"slash_commands\"" line)
+              (condition-case nil
+                  (let ((record (agent-dash-json-read line)))
+                    (when (and (equal (agent-dash-jget record "type") "system")
+                               (equal (agent-dash-jget record "subtype") "init"))
+                      (agent-dash-command-entries (agent-dash-jget record "slash_commands"))))
+                (error nil))))
+          (reverse (append (agent-dash-file-lines file (* 512 1024))
+                           (agent-dash-file-tail-lines file (* 512 1024)))))))))
 
 ;;;; Backend methods
 
@@ -366,20 +391,29 @@ CALLBACK, if non-nil, receives the response."
   (agent-dash-claude--control session "set_model" (list :model model))
   (agent-dash-emit session (list :type 'meta :model model)))
 
+(defun agent-dash-claude--prompt-event (line)
+  "Return the parsed event of LINE if it is a human-written prompt."
+  (when (string-search "\"type\":\"user\"" line)
+    (let ((e (agent-dash-json-read line)))
+      (and (agent-dash-claude--prompt-text e)
+           (not (string-prefix-p "[Request interrupted" (agent-dash-claude--prompt-text e)))
+           e))))
+
 (defun agent-dash-claude--session-info (file)
-  "Return the session plist of transcript FILE, or nil without a prompt."
-  ;; ponytail: reads only the first 256 KiB for the first prompt.
-  (when-let* ((event (seq-some (lambda (line)
-                                 (when (string-search "\"type\":\"user\"" line)
-                                   (let ((e (agent-dash-json-read line)))
-                                     (and (agent-dash-claude--prompt-text e) e))))
-                               (agent-dash-file-lines file (* 256 1024)))))
-    (let ((id (file-name-base file)))
-      (list :id id :root (agent-dash-jget event "cwd")
-            :title (agent-dash-claude--prompt-text event)
-            :time (format-time-string "%Y-%m-%dT%H:%M"
-                                      (file-attribute-modification-time (file-attributes file)))
-            :running (agent-dash-holder-alive-p (agent-dash-holder-dir 'claude id))))))
+  "Return the session plist of transcript FILE."
+  ;; ponytail: the first prompt is looked for in the first 256 KiB only.
+  (let* ((id (file-name-base file))
+         (first (seq-some #'agent-dash-claude--prompt-event
+                          (agent-dash-file-lines file (* 256 1024))))
+         (last (agent-dash-file-find-last file #'agent-dash-claude--prompt-event))
+         (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
+    (list :id id :file file
+          :root (agent-dash-jget (or first last) "cwd")
+          :first (and first (agent-dash-claude--prompt-text first))
+          :last (and last (agent-dash-claude--prompt-text last))
+          :time (or time (agent-dash-mtime file)) :exact (and time t)
+          :empty (not first)
+          :running (agent-dash-holder-alive-p (agent-dash-holder-dir 'claude id)))))
 
 (cl-defmethod agent-dash-backend-transcript ((_ (eql claude)) id)
   "Claude `agent-dash-backend-transcript' for ID."
@@ -401,6 +435,12 @@ CALLBACK, if non-nil, receives the response."
                (unless (string-blank-p text) (push (cons 'assistant text) turns))))))))
     (nreverse turns)))
 
+(cl-defmethod agent-dash-backend-delete ((_ (eql claude)) session)
+  "Claude `agent-dash-backend-delete' for SESSION."
+  (agent-dash-delete-file (plist-get session :file)
+                          (expand-file-name "projects" agent-dash-claude-config-directory)
+                          (plist-get session :id)))
+
 (cl-defmethod agent-dash-backend-sessions ((_ (eql claude)) root)
   "Claude `agent-dash-backend-sessions' for ROOT."
   (let* ((projects (expand-file-name "projects" agent-dash-claude-config-directory))
@@ -412,7 +452,7 @@ CALLBACK, if non-nil, receives the response."
                                    (mapcar #'agent-dash-claude--session-info
                                            (directory-files dir t "\\.jsonl\\'"))))
                             dirs))
-          (lambda (a b) (string> (plist-get a :time) (plist-get b :time))))))
+          (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
 
 (provide 'agent-dash-claude)
 ;;; agent-dash-claude.el ends here

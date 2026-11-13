@@ -204,6 +204,94 @@ once; RETRIED marks that second attempt."
                         (hash-table-keys arguments) " ")))
         (t "")))
 
+(defun agent-dash-dsh--publish-metrics (session values)
+  "Normalize cached DSH projection VALUES into SESSION's shared UI metadata."
+  (let* ((pressure (gethash "contextPressure" values))
+         (selection (agent-dash-jget (gethash "modelSelection" values) "next"))
+         (usage (gethash "tokenUsage" values))
+         (raw (gethash "sessionStats" values))
+         (tokens (make-hash-table :test #'equal))
+         (stats (make-hash-table :test #'equal)))
+    (dolist (pair '(("uncachedInputTokens" . "input")
+                    ("cacheReadTokens" . "cacheRead")
+                    ("cacheWriteTokens" . "cacheWrite")
+                    ("outputTokens" . "output")))
+      (puthash (cdr pair) (agent-dash-jget usage (car pair)) tokens))
+    (let ((counts (mapcar (lambda (key) (gethash key tokens))
+                          '("input" "cacheRead" "cacheWrite" "output"))))
+      (when (cl-every #'numberp counts)
+        (puthash "total" (apply #'+ counts) tokens)))
+    (puthash "tokens" tokens stats)
+    (dolist (key '("turns" "steps" "decodeTokens" "decodeMs"))
+      (puthash key (agent-dash-jget raw key) stats))
+    (agent-dash-emit
+     session (list :type 'meta :stats stats
+                   :context-usage
+                   (when pressure
+                     (let ((context (make-hash-table :test #'equal)))
+                       (puthash "tokens" (or (agent-dash-jget pressure "projectedTokens")
+                                             (agent-dash-jget pressure "pressureTokens"))
+                                context)
+                       (puthash "contextWindow"
+                                (agent-dash-jget pressure "contextWindow") context)
+                       context))
+                   :model (agent-dash-jget selection "model")
+                   :provider (agent-dash-jget selection "provider")
+                   :thinking (agent-dash-jget selection "reasoningEffort")
+                   :agent-preset (gethash "agentPreset" values)
+                   :permission (agent-dash-jget (gethash "permissions" values)
+                                                "currentValue")
+                   :title (gethash "title" values)))))
+
+(defun agent-dash-dsh--apply-projections (session values seq)
+  "Apply replacement projection VALUES at SEQ to SESSION.
+Absent keys retain their values; explicit null clears a key.  Older
+replacements cannot overwrite a newer value of the same projection."
+  (when (hash-table-p values)
+    (let ((cache (or (agent-dash-data session :projections)
+                     (agent-dash-set-data session :projections
+                                          (make-hash-table :test #'equal))))
+          (stamps (or (agent-dash-data session :projection-seqs)
+                      (agent-dash-set-data session :projection-seqs
+                                           (make-hash-table :test #'equal))))
+          (seq (if (numberp seq) seq -1)) changed)
+      (maphash
+       (lambda (key value)
+         (when (and (member key '("contextPressure" "sessionStats" "tokenUsage"
+                                  "modelSelection" "agentPreset" "permissions" "title"))
+                    (>= seq (gethash key stamps -1)))
+           (puthash key value cache)
+           (puthash key seq stamps)
+           (setq changed t)))
+       values)
+      (when changed (agent-dash-dsh--publish-metrics session cache)))))
+
+(defun agent-dash-dsh--control-item (session value)
+  "Apply current or legacy control projection VALUE for SESSION only."
+  (pcase (agent-dash-jget value "type")
+    ("baseline"
+     (when-let* ((entry (agent-dash-jget value "value" "projections"
+                                         (agent-dash-data session :sid))))
+       (agent-dash-dsh--apply-projections
+        session (agent-dash-jget entry "values") (agent-dash-jget entry "asOfSeq"))))
+    ("projection"
+     (when (equal (agent-dash-jget value "sessionId") (agent-dash-data session :sid))
+       (let ((changes (agent-dash-jget value "changes"))
+             (values (make-hash-table :test #'equal)))
+         (cond
+          ((hash-table-p changes) (setq values changes))
+          ((listp changes)
+           (dolist (change changes)
+             (cond ((hash-table-p change)
+                    (when-let* ((key (agent-dash-jget change "key")))
+                      (puthash key (agent-dash-jget change "val") values)))
+                   ((and (consp change) (stringp (car change)))
+                    (puthash (car change) (cadr change) values))))))
+         (when-let* ((key (agent-dash-jget value "key")))
+           (puthash key (agent-dash-jget value "value") values))
+         (agent-dash-dsh--apply-projections
+          session values (agent-dash-jget value "seq")))))))
+
 (defun agent-dash-dsh--event (session event)
   "Translate DSH session EVENT into events of SESSION; skip seen seqs."
   (let ((seq (agent-dash-jget event "seq"))
@@ -267,9 +355,15 @@ once; RETRIED marks that second attempt."
                                             (format "turn %s%s" kind
                                                     (if m (concat ": " m) ""))))))))
         ("model/selection"
-         (agent-dash-emit session (list :type 'meta :model (agent-dash-jget data "model"))))
+         (let ((values (make-hash-table :test #'equal))
+               (selection (make-hash-table :test #'equal)))
+           (puthash "next" data selection)
+           (puthash "modelSelection" selection values)
+           (agent-dash-dsh--apply-projections session values seq)))
         ("session/title"
-         (agent-dash-emit session (list :type 'meta :title (agent-dash-jget data "title"))))
+         (let ((values (make-hash-table :test #'equal)))
+           (puthash "title" (agent-dash-jget data "title") values)
+           (agent-dash-dsh--apply-projections session values seq)))
         ;; Inbox, team, preset and working-directory events are not shown.
         (_ nil)))))
 
@@ -302,11 +396,15 @@ once; RETRIED marks that second attempt."
          ("snapshot"
           (dolist (record (agent-dash-jget value "records"))
             (agent-dash-dsh--event session (agent-dash-jget record "event")))
-          (let ((values (agent-dash-jget value "projections" "values")))
-            (agent-dash-emit session
-                             (list :type 'meta :title (agent-dash-jget values "title")
-                                   :model (agent-dash-jget values "modelSelection"
-                                                           "next" "model")))))
+          (let ((values (copy-hash-table
+                         (or (agent-dash-jget value "projections" "values")
+                             (make-hash-table :test #'equal)))))
+            (when (and (eq (gethash "agentPreset" values 'absent) 'absent)
+                       (agent-dash-jget value "header" "agentPreset"))
+              (puthash "agentPreset" (agent-dash-jget value "header" "agentPreset") values))
+            (agent-dash-dsh--apply-projections
+             session values (or (agent-dash-jget value "projections" "asOfSeq")
+                                (agent-dash-jget value "cursor")))))
          ("event" (agent-dash-dsh--event session (agent-dash-jget value "event")))
          ("assistant-stream" (agent-dash-dsh--stream session (agent-dash-jget value "frame"))))))))
 
@@ -396,10 +494,21 @@ once; RETRIED marks that second attempt."
              sid "session/follow"
              (list :request (list :address (list :kind "session" :sessionId sid)
                                   :maxMessages agent-dash-dsh-max-messages
-                                  :assistantStream t)))))
+                                  :assistantStream t))))
+        (websocket-send-text
+         ws (agent-dash-dsh--open-frame "agent-dash-control" "session/control"
+                                        (make-hash-table))))
       (lambda (data)
-        (when (equal (agent-dash-jget data "streamId") sid)
-          (agent-dash-dsh--item session data)))))))
+        (cond ((equal (agent-dash-jget data "streamId") sid)
+               (agent-dash-dsh--item session data))
+              ((equal (agent-dash-jget data "streamId") "agent-dash-control")
+               (pcase (agent-dash-jget data "type")
+                 ("item" (agent-dash-dsh--control-item
+                          session (agent-dash-jget data "value")))
+                 ("error"
+                  (agent-dash-emit
+                   session '(:type notice :id "dsh-metrics-error" :level warning
+                                   :text "DSH metrics unavailable; reconnect")))))))))))
 
 (cl-defmethod agent-dash-backend-start ((_ (eql dsh)) session &optional resume-id)
   "DSH `agent-dash-backend-start' for SESSION and RESUME-ID."
@@ -427,14 +536,52 @@ once; RETRIED marks that second attempt."
   "DSH `agent-dash-backend-send' for SESSION, TEXT and MODE."
   (let ((sid (agent-dash-data session :sid)))
     (if (string-match-p "\\`/[a-z]" text)
-        ;; Slash commands and skills run through the command endpoint.
-        (agent-dash-dsh--call "commands/execute"
-                              (list :agentId sid :line text :submittedAttachments []))
-      (agent-dash-dsh--call "session/prompt"
-                            (list :request (list :requestId (agent-dash-uuid) :sessionId sid
-                                                 :mode (if (eq mode 'steer) "steer" "queue")
-                                                 :content (vector (list :type "text"
-                                                                        :text text))))))))
+        ;; Host commands use this endpoint; registered skills bypass it below.
+        (let* ((reply (agent-dash-dsh--call
+                       "commands/execute"
+                       (list :agentId sid :line text :submittedAttachments [])))
+               (result (agent-dash-jget reply "result"))
+               (output (agent-dash-jget result "text")))
+          (unless (equal (agent-dash-jget result "kind") "success")
+            (user-error "%s" (or output "DSH command unavailable or rejected")))
+          (agent-dash-emit session (list :type 'notice
+                                         :text (format "%s: %s" text (or output "done")))))
+      (agent-dash-dsh--prompt session text mode))))
+
+(defun agent-dash-dsh--prompt (session text mode)
+  "Submit TEXT as a normal prompt to SESSION using MODE."
+  (agent-dash-dsh--call
+   "session/prompt"
+   (list :request (list :requestId (agent-dash-uuid)
+                        :sessionId (agent-dash-data session :sid)
+                        :mode (if (eq mode 'steer) "steer" "queue")
+                        :content (vector (list :type "text" :text text))))))
+
+(cl-defmethod agent-dash-backend-commands ((_ (eql dsh)) session)
+  "Read SESSION's Host commands and registered skills without invoking a model."
+  (let* ((sid (agent-dash-data session :sid))
+         (commands (agent-dash-dsh--call "commands/list" (list :agentId sid)))
+         (skills (condition-case nil
+                     (agent-dash-jget
+                      (agent-dash-dsh--call "skills/list"
+                                            (list :request (list :sessionId sid))) "skills")
+                   (error nil))))
+    (agent-dash-set-data session :dsh-host-commands (agent-dash-command-entries commands))
+    (agent-dash-set-data session :dsh-skills (agent-dash-command-entries skills))
+    (agent-dash-set-data session :dsh-catalog-loaded t)
+    (append (agent-dash-data session :dsh-host-commands)
+            (agent-dash-data session :dsh-skills))))
+
+(cl-defmethod agent-dash-backend-command ((_ (eql dsh)) session text mode)
+  "Execute Host command TEXT or a verified skill for SESSION in MODE."
+  (let ((name (and (string-match "\\`/\\([^[:space:]]+\\)" text)
+                   (match-string 1 text))))
+    (unless (agent-dash-data session :dsh-catalog-loaded)
+      (agent-dash-backend-commands 'dsh session))
+    (if (and (not (assoc name (agent-dash-data session :dsh-host-commands)))
+             (assoc name (agent-dash-data session :dsh-skills)))
+        (agent-dash-dsh--prompt session text mode)
+      (agent-dash-backend-send 'dsh session text nil mode))))
 
 (cl-defmethod agent-dash-backend-cancel ((_ (eql dsh)) session)
   "DSH `agent-dash-backend-cancel' for SESSION."
@@ -478,6 +625,57 @@ once; RETRIED marks that second attempt."
                                                                  picked)))
                                               (list :custom (string-join custom ", "))))))))))))
 
+(cl-defmethod agent-dash-backend-transcript ((_ (eql dsh)) id)
+  "DSH `agent-dash-backend-transcript' for ID, read from a follow snapshot."
+  (let ((reader (agent-dash-session-create 'dsh "/"))
+        (snapshot nil) (failure nil) socket)
+    (agent-dash-set-data reader :sid id)
+    (setq socket
+          (agent-dash-dsh--socket
+           (lambda (ws)
+             (websocket-send-text
+              ws (agent-dash-dsh--open-frame
+                  id "session/follow"
+                  (list :request (list :address (list :kind "session" :sessionId id)
+                                       ;; ponytail: a session longer than this is cut.
+                                       :maxMessages 100000)))))
+           (lambda (data)
+             (when (equal (agent-dash-jget data "streamId") id)
+               (pcase (agent-dash-jget data "type")
+                 ("error" (setq failure (agent-dash-jget data "error" "message")))
+                 ("item" (when (equal (agent-dash-jget data "value" "type") "snapshot")
+                           (setq snapshot (agent-dash-jget data "value")))))))))
+    (unwind-protect
+        (with-timeout (60 (error "DSH 读取会话超时"))
+          (while (not (or snapshot failure)) (accept-process-output nil 0.05)))
+      (when (websocket-openp socket) (websocket-close socket)))
+    (when failure (error "DSH: %s" failure))
+    (dolist (record (agent-dash-jget snapshot "records"))
+      (agent-dash-dsh--event reader (agent-dash-jget record "event")))
+    (delq nil (mapcar (lambda (item)
+                        (let ((text (plist-get item :text)))
+                          (when (and (memq (plist-get item :type) '(user assistant))
+                                     (stringp text) (not (string-blank-p text)))
+                            (cons (plist-get item :type) text))))
+                      (agent-dash-session-items reader)))))
+
+(defun agent-dash-dsh--prompts (id)
+  "Return the user prompts of session ID from the Host's projection cache.
+The Host keeps each session's turn outline there; session/list omits it.
+Best effort: nil when the file is missing or of another version."
+  (let ((file (expand-file-name
+               (concat "storages/session_projcache/sessions/" id ".json")
+               (file-name-directory agent-dash-dsh-bridge-file))))
+    (when (and (string-match-p "\\`[A-Za-z0-9_-]+\\'" id) (file-readable-p file))
+      (let ((row (agent-dash-jget (agent-dash-json-read
+                                   (with-temp-buffer (insert-file-contents file) (buffer-string)))
+                                  "record" "rows" "turnOutline")))
+        ;; The same version check the Host applies before trusting a row.
+        (when (eql (agent-dash-jget row "ver") 2)
+          (seq-filter (lambda (prompt) (and (stringp prompt) (not (string-blank-p prompt))))
+                      (mapcar (lambda (turn) (agent-dash-jget turn "prompt"))
+                              (agent-dash-jget row "val" "turns"))))))))
+
 (cl-defmethod agent-dash-backend-sessions ((_ (eql dsh)) root)
   "DSH `agent-dash-backend-sessions' for ROOT."
   (let ((want (and root (directory-file-name (expand-file-name root)))))
@@ -487,17 +685,20 @@ once; RETRIED marks that second attempt."
                      (let ((cwd (agent-dash-jget item "cwd")))
                        (when (and (not (agent-dash-jget item "blank"))
                                   (or (not want) (equal cwd want)))
-                         (list :id (agent-dash-jget item "sessionId") :root cwd
-                               :title (or (agent-dash-jget item "projections" "values" "title")
-                                          "(untitled)")
-                               :time (format-time-string
-                                      "%Y-%m-%dT%H:%M"
-                                      (/ (or (agent-dash-jget item "updatedAt") 0) 1000.0))
-                               :running (agent-dash-jget item "running")))))
+                         (let* ((id (agent-dash-jget item "sessionId"))
+                                (prompt (agent-dash-jget item "projections" "values"
+                                                         "sessionListMetadata" "lastPromptAt"))
+                                (updated (agent-dash-jget item "updatedAt"))
+                                (prompts (agent-dash-dsh--prompts id)))
+                           (list :id id :root cwd :first (car prompts) :last (car (last prompts))
+                                 :subagent (equal (agent-dash-jget item "origin") "subagent")
+                                 :title (agent-dash-jget item "projections" "values" "title")
+                                 :time (/ (or prompt updated 0) 1000.0) :exact (and prompt t)
+                                 :running (agent-dash-jget item "running"))))))
                    (agent-dash-jget (agent-dash-dsh--call "session/list"
                                                           (list :_request (make-hash-table)))
                                     "items")))
-     (lambda (a b) (string> (plist-get a :time) (plist-get b :time))))))
+     (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
 
 (provide 'agent-dash-dsh)
 ;;; agent-dash-dsh.el ends here

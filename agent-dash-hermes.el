@@ -81,7 +81,11 @@ A change of kind, or a tool call in between, starts a new item."
                   (list :output (agent-dash-hermes--tool-text content))))))
       ("session_info_update"
        (agent-dash-emit session (list :type 'meta :title (agent-dash-jget update "title"))))
-      ;; Plans, modes and command lists are not shown.
+      ("available_commands_update"
+       (agent-dash-set-data session :command-catalog
+                            (agent-dash-command-entries
+                             (agent-dash-jget update "availableCommands"))))
+      ;; Plans and modes are not shown.
       (_ nil))))
 
 (defun agent-dash-hermes--record (session record)
@@ -130,6 +134,10 @@ A change of kind, or a tool call in between, starts a new item."
         ((agent-dash-jget record "id")
          (agent-dash-holder-reply session (agent-dash-jget record "id") nil
                                   (format "%s is not supported by agent-dash" method))))))))
+
+(cl-defmethod agent-dash-backend-commands ((_ (eql hermes)) session)
+  "Return SESSION's advertised ACP commands."
+  (agent-dash-data session :command-catalog))
 
 ;;;; Backend methods
 
@@ -195,9 +203,8 @@ ACP lists the sessions created through ACP, not those of the Hermes CLI."
   (mapcar (lambda (s)
             (let ((id (agent-dash-jget s "sessionId")))
               (list :id id :root (agent-dash-jget s "cwd")
-                    :title (or (agent-dash-jget s "title") "(untitled)")
-                    :time (let ((time (agent-dash-jget s "updatedAt")))
-                            (if (stringp time) (substring time 0 (min 16 (length time))) ""))
+                    :title (agent-dash-jget s "title")
+                    :time (agent-dash-iso-seconds (agent-dash-jget s "updatedAt"))
                     :running (and (agent-dash-holder-find 'hermes id) t))))
           (agent-dash-jget (agent-dash-holder-oneshot
                             (agent-dash-hermes--command)

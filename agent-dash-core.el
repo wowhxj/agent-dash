@@ -11,6 +11,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'iso8601)
 
 (defgroup agent-dash nil
   "Native agent clients and cross-agent session hub."
@@ -74,6 +75,36 @@ LIMIT, so it is dropped."
   (with-temp-buffer
     (insert-file-contents file nil 0 limit)
     (butlast (split-string (buffer-string) "\n"))))
+
+(defun agent-dash-file-tail-lines (file bytes)
+  "Return the complete lines in the last BYTES of FILE, oldest first."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (with-temp-buffer
+      (insert-file-contents file nil (max 0 (- size bytes)) size)
+      (let ((lines (split-string (buffer-string) "\n")))
+        ;; The first line may start mid-record, the last may be unfinished.
+        (butlast (if (> size bytes) (cdr lines) lines))))))
+
+(defun agent-dash-file-find-last (file predicate)
+  "Return the first non-nil PREDICATE value over FILE's lines, newest first.
+Reads growing windows from the end, so long tool-heavy sessions still
+find an early match without reading small files twice."
+  (let ((size (file-attribute-size (file-attributes file))) (window (* 256 1024)) found)
+    (while (and (not found) window)
+      (setq found (seq-some predicate (reverse (agent-dash-file-tail-lines file window)))
+            window (and (< window size) (* window 8))))
+    found))
+
+(defun agent-dash-iso-seconds (string)
+  "Return ISO 8601 timestamp STRING as float seconds, or nil."
+  (when (stringp string)
+    (condition-case nil
+        (float-time (encode-time (iso8601-parse string)))
+      (error nil))))
+
+(defun agent-dash-mtime (file)
+  "Return the modification time of FILE as float seconds."
+  (float-time (file-attribute-modification-time (file-attributes file))))
 
 (defun agent-dash-session-create (backend root)
   "Return a new session for BACKEND in ROOT."
@@ -146,7 +177,7 @@ LIMIT, so it is dropped."
 
 (cl-defgeneric agent-dash-backend-capabilities (backend)
   "Return capabilities of BACKEND as a plist.
-Keys: :quit (`stop' or `detach'), :steer, :images, :models.")
+Keys: :quit (`stop' or `detach'), :steer, :images, :models, :delete.")
 
 (cl-defgeneric agent-dash-backend-start (backend session &optional resume-id)
   "Start SESSION on BACKEND, resuming backend session RESUME-ID if non-nil.")
@@ -169,6 +200,29 @@ MODE is `prompt', `follow-up' or `steer'.")
   (ignore session request answer)
   (user-error "Backend %s cannot answer requests" backend))
 
+(defun agent-dash-command-entries (commands)
+  "Normalize backend COMMANDS into (NAME . DESCRIPTION) pairs."
+  (delq nil
+        (mapcar
+         (lambda (entry)
+           (let ((name (if (stringp entry) entry (agent-dash-jget entry "name"))))
+             (when (and (stringp name) (not (string-empty-p name)))
+               (setq name (string-remove-prefix "/" name))
+               (when (string-match-p "\\`[^[:space:]]+\\'" name)
+                 (cons name (or (and (hash-table-p entry)
+                                     (agent-dash-jget entry "description"))
+                                "Backend command"))))))
+         commands)))
+
+(cl-defgeneric agent-dash-backend-commands (backend session)
+  "Return BACKEND's advertised command/skill (NAME . DESCRIPTION) pairs for SESSION."
+  (ignore backend session)
+  nil)
+
+(cl-defgeneric agent-dash-backend-command (backend session text mode)
+  "Execute native slash command TEXT on BACKEND for SESSION with MODE."
+  (agent-dash-backend-send backend session text nil mode))
+
 (cl-defgeneric agent-dash-backend-models (backend session)
   "Return model names SESSION on BACKEND can switch to."
   (ignore session)
@@ -181,7 +235,17 @@ MODE is `prompt', `follow-up' or `steer'.")
 
 (cl-defgeneric agent-dash-backend-sessions (backend root)
   "Return saved sessions of BACKEND under ROOT (nil means all).
-Each is a plist (:id :title :root :time :running)."
+Each is a plist with these keys (all but :id optional):
+  :id     backend session id
+  :root   project directory
+  :first  first user message, or :title when the backend only has a title
+  :last   latest user message
+  :time   float seconds of the latest activity
+  :exact  non-nil when :time is a message time, not a file or record time
+  :running non-nil when a live instance holds the session
+  :file   saved session file, when there is one
+    :empty  non-nil when the session holds no user message
+  :subagent non-nil for a session a parent agent started"
   (ignore backend root)
   nil)
 
@@ -190,6 +254,24 @@ Each is a plist (:id :title :root :time :running)."
 ROLE is `user' or `assistant'."
   (ignore id)
   (user-error "Backend %s cannot read saved transcripts" backend))
+
+(cl-defgeneric agent-dash-backend-delete (backend session)
+  "Permanently delete saved SESSION of BACKEND.
+SESSION is a plist from `agent-dash-backend-sessions'."
+  (ignore session)
+  (user-error "%s 会话不支持删除" backend))
+
+(defun agent-dash-delete-file (file directory id)
+  "Delete session FILE after checking it lies in DIRECTORY and names ID.
+Refuse symlinks, non-regular files and files of other sessions."
+  (unless (and (stringp file) (not (file-remote-p file)) (file-regular-p file)
+               (not (file-symlink-p file)))
+    (user-error "会话文件不存在、不是普通文件或为符号链接：%s" file))
+  (let ((true (file-truename file)))
+    (unless (and (file-in-directory-p true (file-truename directory))
+                 (string-search id (file-name-nondirectory true)))
+      (user-error "拒绝删除存储目录之外或与会话 ID 不符的文件：%s" file))
+    (delete-file true)))
 
 (defun agent-dash-capability (session key)
   "Return capability KEY of SESSION's backend."

@@ -20,6 +20,10 @@
 (require 'agent-dash-codex)
 (require 'agent-dash-hermes)
 (require 'agent-dash-hub)
+(require 'agent-dash-search)
+
+(when agent-dash-summary-enable
+  (agent-dash-summary-mode 1))
 
 (provide 'agent-dash)
 ;;; agent-dash.el ends here
