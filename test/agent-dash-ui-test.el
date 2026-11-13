@@ -357,5 +357,122 @@
             (with-current-buffer buffer
               (let ((agent-dash--quitting t)) (kill-buffer)))))))))
 
+(defun agent-dash-ui-test-position (text)
+  "Return the first transcript position of TEXT, failing if absent."
+  (save-excursion
+    (goto-char (point-min))
+    (should (search-forward text agent-dash--transcript-end t))
+    (- (point) (length text))))
+
+(ert-deftest agent-dash-ui-test-active-process-expands-and-settles-across-backends ()
+  "A final message is not the run boundary; preserve drafts through both states."
+  (let ((agent-dash--sessions nil))
+    (dolist (backend '(pi claude codex dsh hermes))
+      (let* ((session (agent-dash-session-create backend temporary-file-directory))
+             (buffer (agent-dash--setup-buffer session)))
+        (unwind-protect
+            (with-current-buffer buffer
+              (agent-dash--set-input "keep draft")
+              (goto-char (+ agent-dash--input-start 3))
+              (agent-dash-emit session '(:type run :state running))
+              (agent-dash-emit session '(:type user :id "u" :text "question"))
+              (agent-dash-emit session '(:type assistant :id "thought" :text ""
+                                               :thinking "First thought\nDetailed second thought"
+                                               :final t))
+              (agent-dash-emit session '(:type tool :id "tool" :name "working-tool"
+                                               :args "inspect" :output "DETAILED OUTPUT"
+                                               :status running))
+              (should (plist-get (agent-dash-item session "thought") :process-open))
+              (should (string-search "First thought\nDetailed second thought"
+                                     (agent-dash-ui-test-transcript)))
+              (should-not (invisible-p (agent-dash-ui-test-position "DETAILED OUTPUT")))
+              (agent-dash-refresh-chat)
+              (agent-dash-emit session '(:type tool :id "tool" :output "UPDATED OUTPUT"
+                                               :status success))
+              (agent-dash-emit session '(:type assistant :id "answer"
+                                               :text "FINAL ANSWER" :final t))
+              (should (plist-get (agent-dash-item session "thought") :process-open))
+              (should-not (invisible-p (agent-dash-ui-test-position "UPDATED OUTPUT")))
+              (agent-dash-emit session '(:type run :state idle))
+              (should-not (plist-get (agent-dash-item session "thought") :process-open))
+              (should (invisible-p (agent-dash-ui-test-position "working-tool")))
+              (should-not (invisible-p (agent-dash-ui-test-position "FINAL ANSWER")))
+              (should (equal (agent-dash--input) "keep draft"))
+              (should (= (point) (+ agent-dash--input-start 3))))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer (let ((agent-dash--quitting t)) (kill-buffer)))))))))
+
+(ert-deftest agent-dash-ui-test-active-process-manual-visibility-survives-updates ()
+  (agent-dash-ui-test-with-chat
+   (agent-dash-emit session '(:type run :state running))
+   (agent-dash-emit session '(:type user :id "u" :text "question"))
+   (agent-dash-emit session '(:type tool :id "tool" :name "tool" :output "DETAIL"))
+   (let ((item (agent-dash-item session "tool")))
+     (should-not (agent-dash--item-folded-p item))
+     (goto-char (agent-dash-ui-test-position "tool  "))
+     (agent-dash-toggle)
+     (should (agent-dash--item-folded-p item))
+     (agent-dash-emit session '(:type tool :id "tool" :output "MORE DETAIL"))
+     (should (agent-dash--item-folded-p item))
+     (goto-char (plist-get item :start))
+     (agent-dash-toggle)
+     (agent-dash-emit session '(:type tool :id "other" :name "next-tool"))
+     (should-not (plist-get item :process-open))
+     (goto-char (plist-get item :start))
+     (agent-dash-toggle)
+     (agent-dash-refresh-chat)
+     (should (plist-get item :process-open))
+     (agent-dash-emit session '(:type run :state idle))
+     (should-not (plist-get item :process-open))
+     (goto-char (plist-get item :start))
+     (agent-dash-toggle)
+     (agent-dash-emit session '(:type meta :phase "idle metadata"))
+     (should (plist-get item :process-open)))))
+
+(ert-deftest agent-dash-ui-test-new-run-does-not-reopen-historical-process ()
+  (agent-dash-ui-test-with-chat
+   (agent-dash-emit session '(:type user :id "old" :text "old question"))
+   (agent-dash-emit session '(:type tool :id "old-tool" :name "history-tool"))
+   (agent-dash-emit session '(:type assistant :id "old-answer" :text "old answer" :final t))
+   (agent-dash-emit session '(:type run :state running))
+   (should-not (plist-get (agent-dash-item session "old-tool") :process-open))
+   (agent-dash-emit session '(:type user :id "new" :text "new question"))
+   (agent-dash-emit session '(:type tool :id "new-tool" :name "live-tool" :output "live"))
+   (should (plist-get (agent-dash-item session "new-tool") :process-open))
+   (should (invisible-p (agent-dash-ui-test-position "history-tool")))
+   (agent-dash-emit session '(:type run :state idle))
+   (agent-dash-emit session '(:type run :state running))
+   (should-not (plist-get (agent-dash-item session "new-tool") :process-open))
+   ;; Continuations without a new user echo reopen only on fresh activity.
+   (agent-dash-emit session '(:type tool :id "continuation" :name "continuing" :output "fresh"))
+   (should (plist-get (agent-dash-item session "new-tool") :process-open))
+   (agent-dash-emit session '(:type meta :phase "continuing"))
+   (should (plist-get (agent-dash-item session "new-tool") :process-open))))
+
+(ert-deftest agent-dash-ui-test-process-head-can-become-a-visible-final-answer ()
+  (agent-dash-ui-test-with-chat
+   (agent-dash-emit session '(:type run :state running))
+   (agent-dash-emit session '(:type user :id "u" :text "question"))
+   (agent-dash-emit session '(:type assistant :id "a" :text "" :thinking "thinking"))
+   (agent-dash-emit session '(:type tool :id "t" :name "tool" :output "visible detail"))
+   (agent-dash-emit session '(:type assistant :id "a" :text "final answer" :final t))
+   (should-not (plist-get (agent-dash-item session "a") :process-group))
+   (should (plist-get (agent-dash-item session "t") :process-open))
+   (should-not (invisible-p (agent-dash-ui-test-position "visible detail")))
+   (agent-dash-emit session '(:type run :state idle))
+   (should (invisible-p (agent-dash-ui-test-position "tool")))
+   (should-not (invisible-p (agent-dash-ui-test-position "final answer")))))
+
+(ert-deftest agent-dash-ui-test-late-running-state-opens-an-unfinished-snapshot ()
+  (agent-dash-ui-test-with-chat
+   (agent-dash-emit session '(:type user :id "u" :text "restored task"))
+   (agent-dash-emit session '(:type tool :id "t" :name "snapshot-tool" :output "LIVE OUTPUT"))
+   (should-not (plist-get (agent-dash-item session "t") :process-open))
+   (agent-dash-emit session '(:type run :state running))
+   (should (plist-get (agent-dash-item session "t") :process-open))
+   (should-not (invisible-p (agent-dash-ui-test-position "LIVE OUTPUT")))
+   (agent-dash-emit session '(:type run :state idle))
+   (should-not (plist-get (agent-dash-item session "t") :process-open))))
+
 (provide 'agent-dash-ui-test)
 ;;; agent-dash-ui-test.el ends here

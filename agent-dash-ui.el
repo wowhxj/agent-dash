@@ -96,9 +96,15 @@ The prompt history keeps the text as typed.")
                               (agent-dash-session-backend session)))
               'face 'agent-dash-assistant-face))
 
+(defun agent-dash--item-folded-p (item)
+  "Whether ITEM's details are folded, honoring a manual override."
+  (if (plist-member item :folded)
+      (not (eq (plist-get item :folded) 'open))
+    (not (plist-get item :process-active))))
+
 (defun agent-dash--item-body (session item)
   "Return the display body of timeline ITEM of SESSION."
-  (let ((folded (not (eq (plist-get item :folded) 'open))))
+  (let ((folded (agent-dash--item-folded-p item)))
     (pcase (plist-get item :type)
       ('user
        (concat "\n"
@@ -179,24 +185,51 @@ The prompt history keeps the text as typed.")
      (if closed (propertize body 'invisible 'agent-dash-process) body))))
 
 (defun agent-dash--render-process (session changed)
-  "Group SESSION's process items by user turn and redraw CHANGED items."
-  (let (groups group)
+  "Group SESSION's process items and redraw CHANGED or lifecycle changes.
+The current turn starts expanded and folds only when the run ends.  Manual
+visibility choices survive intermediate updates, but not the finish transition."
+  (let (groups group active-first answered)
     (dolist (item (agent-dash-session-items session))
       (when (eq (plist-get item :type) 'user)
         (when group (push (nreverse group) groups))
-        (setq group nil))
-      (when (agent-dash--process-p item) (push item group)))
-    (when group (push (nreverse group) groups))
+        (setq group nil answered nil))
+      (if (agent-dash--process-p item)
+          (progn (push item group) (setq answered nil))
+        (when (and (eq (plist-get item :type) 'assistant) (plist-get item :final)
+                   (or (plist-get item :images)
+                       (not (string-blank-p (or (plist-get item :text) "")))))
+          (setq answered t))))
+    (when group
+      (setq group (nreverse group) active-first (car group))
+      (push group groups))
     (dolist (items (nreverse groups))
-      (let ((first (car items)) (count (length items)))
+      (let* ((first (car items)) (count (length items))
+             (head-changed (not (equal (plist-get first :process-group)
+                                       (plist-get first :id))))
+             (active (and (eq first active-first)
+                          (eq (agent-dash-session-state session) 'running)
+                          (or (not (plist-get first :process-settled))
+                              (and (memq changed items)
+                                   (not (plist-get changed :process-settled))))))
+             (transition (not (eq active (plist-get first :process-active)))))
+        (when (or transition (and active head-changed))
+          (plist-put first :process-open active))
         (dolist (item items)
-          (let ((redraw (or (eq item changed)
+          (let ((redraw (or (eq item changed) transition
+                            (not (eq active (plist-get item :process-active)))
                             (not (equal (plist-get item :process-group)
                                         (plist-get first :id)))
                             (and (eq item first)
-                                 (not (eql (plist-get item :process-count)
-                                           count))))))
+                                 (not (eql (plist-get item :process-count) count))))))
             (plist-put item :process-group (plist-get first :id))
+            (plist-put item :process-active active)
+            ;; Distinguish completed history from a snapshot received before
+            ;; its running-state signal. Neither needs to infer from :final
+            ;; while the backend is still running.
+            (when (or active transition (not (eq first active-first))
+                      (plist-get first :process-settled)
+                      (and answered (not (eq (agent-dash-session-state session) 'running))))
+              (plist-put item :process-settled (not active)))
             (when (eq item first) (plist-put item :process-count count))
             (when redraw (agent-dash--render session item))))))))
 
@@ -237,8 +270,9 @@ The prompt history keeps the text as typed.")
         (when item
           (unless (agent-dash--process-p item)
             (plist-put item :process-group nil)
-            (agent-dash--render session item))
-          (agent-dash--render-process session item))
+            (plist-put item :process-active nil)
+            (agent-dash--render session item)))
+        (agent-dash--render-process session item)
         (agent-dash--sync-spinner)
         (agent-dash--schedule-answer)
         (force-mode-line-update)))))
@@ -680,7 +714,7 @@ Return the session."
             (when (equal (plist-get member :process-group) (plist-get group :id))
               (agent-dash--render agent-dash--session member)))
           (goto-char (plist-get item :start)))
-      (plist-put item :folded (if (eq (plist-get item :folded) 'open) nil 'open))
+      (plist-put item :folded (if (agent-dash--item-folded-p item) 'open nil))
       (let ((pos (point)))
         (agent-dash--render agent-dash--session item)
         (goto-char (min pos (plist-get item :end)))))))
