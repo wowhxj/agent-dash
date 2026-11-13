@@ -66,6 +66,8 @@ Pickers use `completing-read`: existing Vertico is respected and optional Orderl
 
 ### Hub
 
+History discovery includes Pi's flat, project and nested JSONL layouts, Codex's latest native state index (including archived/subagent/metadata-only threads), DSH's empty sessions, and Hermes CLI history from its native index. Empty, internal and archived sessions count as loaded and are then filtered by the hub. Codex and Hermes index reads require `sqlite3` and use `-readonly`; Codex falls back to a paginated, all-source app-server listing when no index exists. Native stores are not modified. Use `!` for per-source read warnings.
+
 `M-x agent-dash-hub` fills the frame with every saved session, grouped by project. Columns: agent, `●` live, date (`*` = source time, not a message time), short ID, project, summary (falls back to the first prompt), latest prompt, summary status.
 
 | Key | Action |

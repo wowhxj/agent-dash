@@ -19,6 +19,10 @@
   "Hermes executable."
   :type 'string)
 
+(defcustom agent-dash-hermes-directory (or (getenv "HERMES_HOME") "~/.hermes/")
+  "Hermes native history directory."
+  :type 'directory)
+
 (add-to-list 'agent-dash-backends 'hermes t)
 
 (defconst agent-dash-hermes--client
@@ -197,44 +201,110 @@ A change of kind, or a tool call in between, starts a new item."
                         (list :outcome "selected" :optionId (agent-dash-jget option "optionId"))
                       '(:outcome "cancelled"))))))
 
+(defun agent-dash-hermes--index ()
+  "Return the existing native history index, or nil."
+  (let ((file (expand-file-name "state.db" agent-dash-hermes-directory)))
+    (when (file-exists-p file) file)))
+
+(defun agent-dash-hermes--saved-messages (file id)
+  "Read active dialogue of session ID from native index FILE."
+  (delq
+   nil
+   (mapcar
+    (lambda (message)
+      (let* ((role (agent-dash-jget message "role"))
+             (raw (agent-dash-jget message "content"))
+             (content (if (stringp raw)
+                          (condition-case nil (agent-dash-json-read raw)
+                            (json-error raw)) raw))
+             (text (if (or (stringp content) (listp content))
+                       (agent-dash-json-text content) "")))
+        (when (and (member role '("user" "assistant"))
+                   (member (agent-dash-jget message "display_kind") '(nil ""))
+                   (member (agent-dash-jget message "_compressed_summary") '(nil 0 ""))
+                   (not (and (equal (agent-dash-jget message "active") 0)
+                             (equal (agent-dash-jget message "compacted") 0)))
+                   (not (string-blank-p text))
+                   (not (string-match-p
+                         (concat "\\`\\(?:\\[CONTEXT COMPACTION — REFERENCE ONLY\\]"
+                                 "\\|\\[CONTEXT SUMMARY\\]:\\)")
+                         (string-trim-left text)))
+                   (not (string-search "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]" text)))
+          (list :role role :text text :time (agent-dash-jget message "timestamp")))))
+    (agent-dash-sqlite-rows
+     file (concat "SELECT * FROM messages WHERE session_id=" (agent-dash-sqlite-quote id)
+                  " ORDER BY timestamp, rowid")))))
+
+(defun agent-dash-hermes--saved-sessions (file root)
+  "Read native sessions from FILE, optionally filtered to ROOT."
+  (mapcar
+   (lambda (row)
+     (let* ((id (agent-dash-jget row "id"))
+            (users (seq-filter (lambda (m) (equal (plist-get m :role) "user"))
+                               (agent-dash-hermes--saved-messages file id)))
+            (time (plist-get (car (last users)) :time))
+            (config (condition-case nil
+                        (agent-dash-json-read (or (agent-dash-jget row "model_config") "{}"))
+                      (json-error nil))))
+       (list :id id :root (agent-dash-jget row "cwd") :title (agent-dash-jget row "title")
+             :first (plist-get (car users) :text) :last (plist-get (car (last users)) :text)
+             :time (or (and (numberp time) time) (agent-dash-iso-seconds time)
+                       (agent-dash-jget row "started_at") 0)
+             :exact (and time t) :empty (not users)
+             :archived (equal (agent-dash-jget row "archived") 1)
+             :subagent (or (equal (agent-dash-jget row "source") "subagent")
+                           (and (agent-dash-jget config "_delegate_from") t))
+             :running (and (agent-dash-holder-find 'hermes id) t))))
+   (agent-dash-sqlite-rows
+    file (concat "SELECT * FROM sessions"
+                 (when root (concat " WHERE cwd=" (agent-dash-sqlite-quote
+                                                   (directory-file-name
+                                                    (expand-file-name root)))))))))
+
 (cl-defmethod agent-dash-backend-sessions ((_ (eql hermes)) root)
   "Hermes `agent-dash-backend-sessions' for ROOT.
-ACP lists the sessions created through ACP, not those of the Hermes CLI."
-  (mapcar (lambda (s)
-            (let ((id (agent-dash-jget s "sessionId")))
-              (list :id id :root (agent-dash-jget s "cwd")
-                    :title (agent-dash-jget s "title")
-                    :time (agent-dash-iso-seconds (agent-dash-jget s "updatedAt"))
-                    :running (and (agent-dash-holder-find 'hermes id) t))))
-          (agent-dash-jget (agent-dash-holder-oneshot
-                            (agent-dash-hermes--command)
-                            `(("initialize" . ,agent-dash-hermes--client)
-                              ("session/list" . ,(when root
-                                                   (list :cwd (directory-file-name
-                                                               (expand-file-name root)))))))
-                           "sessions")))
+Read the native index when present; ACP listing alone omits CLI history."
+  (if-let* ((index (agent-dash-hermes--index)))
+      (agent-dash-hermes--saved-sessions index root)
+    (mapcar (lambda (s)
+              (let ((id (agent-dash-jget s "sessionId")))
+                (list :id id :root (agent-dash-jget s "cwd")
+                      :title (agent-dash-jget s "title")
+                      :time (agent-dash-iso-seconds (agent-dash-jget s "updatedAt"))
+                      :running (and (agent-dash-holder-find 'hermes id) t))))
+            (agent-dash-jget (agent-dash-holder-oneshot
+                              (agent-dash-hermes--command)
+                              `(("initialize" . ,agent-dash-hermes--client)
+                                ("session/list" . ,(when root
+                                                     (list :cwd (directory-file-name
+                                                                 (expand-file-name root)))))))
+                             "sessions"))))
 
 (cl-defmethod agent-dash-backend-transcript ((_ (eql hermes)) id)
-  "Hermes `agent-dash-backend-transcript' for ID, replayed by session/load."
-  (let* ((info (or (seq-find (lambda (s) (equal (plist-get s :id) id))
-                             (agent-dash-backend-sessions 'hermes nil))
-                   (user-error "No saved Hermes session %s" id)))
-         (turns nil))
-    (agent-dash-holder-oneshot
-     (agent-dash-hermes--command)
-     `(("initialize" . ,agent-dash-hermes--client)
-       ("session/load" . (:sessionId ,id :cwd ,(plist-get info :root) :mcpServers [])))
-     (lambda (record)
-       (let* ((update (agent-dash-jget record "params" "update"))
-              (role (pcase (agent-dash-jget update "sessionUpdate")
-                      ("user_message_chunk" 'user)
-                      ("agent_message_chunk" 'assistant)))
-              (text (agent-dash-jget update "content" "text")))
-         (when (and role text)
-           (if (eq (car (car turns)) role)
-               (setcdr (car turns) (concat (cdr (car turns)) text))
-             (push (cons role text) turns))))))
-    (nreverse turns)))
+  "Hermes `agent-dash-backend-transcript' for ID from native history or ACP."
+  (if-let* ((index (agent-dash-hermes--index)))
+      (mapcar (lambda (message) (cons (intern (plist-get message :role))
+                                      (plist-get message :text)))
+              (agent-dash-hermes--saved-messages index id))
+    (let* ((info (or (seq-find (lambda (s) (equal (plist-get s :id) id))
+                               (agent-dash-backend-sessions 'hermes nil))
+                     (user-error "No saved Hermes session %s" id)))
+           (turns nil))
+      (agent-dash-holder-oneshot
+       (agent-dash-hermes--command)
+       `(("initialize" . ,agent-dash-hermes--client)
+         ("session/load" . (:sessionId ,id :cwd ,(plist-get info :root) :mcpServers [])))
+       (lambda (record)
+         (let* ((update (agent-dash-jget record "params" "update"))
+                (role (pcase (agent-dash-jget update "sessionUpdate")
+                        ("user_message_chunk" 'user)
+                        ("agent_message_chunk" 'assistant)))
+                (text (agent-dash-jget update "content" "text")))
+           (when (and role text)
+             (if (eq (car (car turns)) role)
+                 (setcdr (car turns) (concat (cdr (car turns)) text))
+               (push (cons role text) turns))))))
+      (nreverse turns))))
 
 (provide 'agent-dash-hermes)
 ;;; agent-dash-hermes.el ends here

@@ -683,14 +683,15 @@ Best effort: nil when the file is missing or of another version."
      (delq nil
            (mapcar (lambda (item)
                      (let ((cwd (agent-dash-jget item "cwd")))
-                       (when (and (not (agent-dash-jget item "blank"))
-                                  (or (not want) (equal cwd want)))
+                       (when (or (not want) (equal cwd want))
                          (let* ((id (agent-dash-jget item "sessionId"))
                                 (prompt (agent-dash-jget item "projections" "values"
                                                          "sessionListMetadata" "lastPromptAt"))
                                 (updated (agent-dash-jget item "updatedAt"))
-                                (prompts (agent-dash-dsh--prompts id)))
-                           (list :id id :root cwd :first (car prompts) :last (car (last prompts))
+                                (empty (agent-dash-jget item "blank"))
+                                (prompts (unless empty (agent-dash-dsh--prompts id))))
+                           (list :id id :root cwd :empty empty
+                                 :first (car prompts) :last (car (last prompts))
                                  :subagent (equal (agent-dash-jget item "origin") "subagent")
                                  :title (agent-dash-jget item "projections" "values" "title")
                                  :time (/ (or prompt updated 0) 1000.0) :exact (and prompt t)

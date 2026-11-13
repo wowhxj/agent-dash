@@ -127,12 +127,15 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
 
 (defun agent-dash-hub--load (backend)
   "List BACKEND's sessions into the shared inventory."
-  (let ((old (gethash backend agent-dash-hub--sources)))
+  (let ((old (gethash backend agent-dash-hub--sources))
+        (agent-dash-history-warnings nil))
     (condition-case err
         (let ((rows (mapcar (lambda (s) (agent-dash-hub--row backend s))
                             (agent-dash-backend-sessions backend nil))))
           (agent-dash-summary-register rows)
-          (puthash backend (list :status 'ok :rows rows) agent-dash-hub--sources))
+          (puthash backend (list :status 'ok :rows rows
+                                 :warnings (nreverse agent-dash-history-warnings))
+                   agent-dash-hub--sources))
       ;; A broken source keeps its previous rows, marked stale.
       (error (puthash backend (list :status 'error :rows (plist-get old :rows)
                                     :error (error-message-string err))
@@ -294,15 +297,19 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
 
 (defun agent-dash-hub--status-line (rows)
   "Return the header-line status for the visible ROWS."
-  (let ((total (length (agent-dash-hub--all))) loading failed)
+  (let ((total (length (agent-dash-hub--all))) loading failed warnings)
     (dolist (backend agent-dash-backends)
+      (when-let* ((notes (plist-get (gethash backend agent-dash-hub--sources) :warnings)))
+        (push (format "%s (%d)" backend (length notes)) warnings))
       (pcase (plist-get (gethash backend agent-dash-hub--sources) :status)
         ('loading (push (symbol-name backend) loading))
         ('error (push (symbol-name backend) failed))))
     (concat "agent-dash"
             (format "  显示 %d/已载入 %d（过滤/隐藏 %d）" (length rows) total (- total (length rows)))
             (if loading (format "  扫描中：%s" (string-join (nreverse loading) ", ")) "")
-            (if failed (format "  来源失败：%s  [! 诊断]" (string-join (nreverse failed) ", ")) ""))))
+            (if failed (format "  来源失败：%s  [! 诊断]" (string-join (nreverse failed) ", ")) "")
+            (if warnings (format "  读取警告：%s  [! 诊断]"
+                                 (string-join (nreverse warnings) ", ")) ""))))
 
 (defun agent-dash-hub--render ()
   "Redraw the hub, keeping point on the same row."
@@ -677,7 +684,9 @@ Candidates keep the list order and show the table header as their group."
                          (length (plist-get source :rows))
                          (if (plist-get source :error)
                              (concat "\n  " (plist-get source :error))
-                           "")))))
+                           "")))
+          (dolist (warning (plist-get source :warnings))
+            (princ (format "  %s\n" warning)))))
       (princ "\n")
       (princ (agent-dash-summary-describe))
       (dolist (row (agent-dash-hub--all))

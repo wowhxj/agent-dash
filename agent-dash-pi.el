@@ -417,11 +417,16 @@
 
 (defun agent-dash-pi--user-entry (line)
   "Return the parsed entry of LINE if it is a user message with text."
-  (when (string-search "\"role\":\"user\"" line)
-    (let ((entry (agent-dash-json-read line)))
-      (unless (string-blank-p (agent-dash-pi--blocks-text
-                               (agent-dash-jget entry "message" "content")))
-        entry))))
+  (when (string-match-p "\"role\"[ \t]*:[ \t]*\"user\"" line)
+    (condition-case nil
+        (let ((entry (agent-dash-json-read line)))
+          (when (and (equal (agent-dash-jget entry "message" "role") "user")
+                     (not (string-blank-p (agent-dash-pi--blocks-text
+                                           (agent-dash-jget entry "message" "content")))))
+            entry))
+      (json-error
+       (push "Pi: malformed user record" agent-dash-history-warnings)
+       nil))))
 
 (defun agent-dash-pi--entry-text (entry)
   "Return the user text of message ENTRY."
@@ -446,8 +451,17 @@
 
 (defun agent-dash-pi--file (id)
   "Return the saved session file of Pi session ID, or nil."
-  (car (file-expand-wildcards
-        (expand-file-name (format "*/*_%s.jsonl" id) agent-dash-pi-sessions-directory))))
+  (seq-find (lambda (file)
+              (equal id (plist-get (agent-dash-pi--session-info file) :id)))
+            (agent-dash-pi--files id)))
+
+(defun agent-dash-pi--files (&optional id)
+  "Return saved Pi JSONL files in every layout, optionally matching ID."
+  (let ((base (expand-file-name agent-dash-pi-sessions-directory)))
+    (when (file-directory-p base)
+      (directory-files-recursively
+       base (if id (concat "\\(?:\\`\\|_\\)" (regexp-quote id) "\\.jsonl\\'")
+              "\\.jsonl\\'")))))
 
 (cl-defmethod agent-dash-backend-transcript ((_ (eql pi)) id)
   "Pi `agent-dash-backend-transcript' for ID: the active branch only."
@@ -475,22 +489,21 @@
 
 (cl-defmethod agent-dash-backend-sessions ((_ (eql pi)) root)
   "Pi `agent-dash-backend-sessions' for ROOT."
-  (let* ((base (expand-file-name agent-dash-pi-sessions-directory))
-         (dirs (if root
-                   (list (expand-file-name
-                          (concat "--" (replace-regexp-in-string
-                                        "/" "-" (string-remove-prefix
-                                                 "/" (directory-file-name
-                                                      (expand-file-name root))))
-                                  "--")
-                          base))
-                 (and (file-directory-p base)
-                      (directory-files base t "\\`--")))))
-    (sort (delq nil (mapcan (lambda (dir)
-                              (and (file-directory-p dir)
-                                   (mapcar #'agent-dash-pi--session-info
-                                           (directory-files dir t "\\.jsonl\\'"))))
-                            dirs))
+  (let ((want (and root (directory-file-name (expand-file-name root)))))
+    (sort (delq nil
+                (mapcar
+                 (lambda (file)
+                   (condition-case err
+                       (let* ((row (agent-dash-pi--session-info file))
+                              (cwd (plist-get row :root)))
+                         (when (and row (or (not want)
+                                            (and cwd (equal want (directory-file-name
+                                                                  (expand-file-name cwd))))))
+                           row))
+                     (error
+                      (push (format "%s: %s" file (car err)) agent-dash-history-warnings)
+                      nil)))
+                 (agent-dash-pi--files)))
           (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
 
 (provide 'agent-dash-pi)

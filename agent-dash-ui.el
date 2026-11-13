@@ -87,15 +87,16 @@ The prompt history keeps the text as typed.")
   (let ((folded (not (eq (plist-get item :folded) 'open))))
     (pcase (plist-get item :type)
       ('user
-       (propertize
-        (concat "\nYou: "
-                (let* ((text (plist-get item :text))
-                       (cut (string-search agent-dash-reference-boundary text)))
-                  (if cut (substring text 0 cut) text))
-                (if (plist-get item :images)
-                    (format " [%d image(s)]" (length (plist-get item :images)))
-                  "") "\n")
-        'face 'agent-dash-user-face))
+       (concat "\n"
+               (propertize
+                (concat "You: "
+                        (let* ((text (plist-get item :text))
+                               (cut (string-search agent-dash-reference-boundary text)))
+                          (if cut (substring text 0 cut) text))
+                        (if (plist-get item :images)
+                            (format " [%d image(s)]" (length (plist-get item :images)))
+                          "") "\n")
+                'face 'agent-dash-user-face)))
       ('assistant
        (let ((thinking (plist-get item :thinking))
              (text (or (plist-get item :text) "")))

@@ -43,6 +43,26 @@ ITEM is nil when only session-level state (run, queue, meta) changed.")
             (substring h 13 16) (+ 8 (random 4)) (substring h 17 20)
             (substring h 20 32))))
 
+(defvar agent-dash-history-warnings nil
+  "Read warnings collected during a backend history scan.")
+
+(defun agent-dash-sqlite-rows (file query)
+  "Read QUERY rows from existing SQLite FILE without opening it for writing.
+Use the sqlite3 CLI with separate arguments, never shell interpolation."
+  (unless (file-readable-p file) (user-error "History index is not readable: %s" file))
+  (let ((sqlite (or (executable-find "sqlite3")
+                    (user-error "SQLite3 is required to read native session history"))))
+    (with-temp-buffer
+      (unless (zerop (process-file sqlite nil (list (current-buffer) nil) nil
+                                   "-readonly" "-json" file query))
+        (error "Cannot read history index %s" file))
+      (unless (string-blank-p (buffer-string))
+        (agent-dash-json-read (buffer-string))))))
+
+(defun agent-dash-sqlite-quote (text)
+  "Return TEXT as a safely quoted SQLite string literal."
+  (concat "'" (replace-regexp-in-string "'" "''" text t t) "'"))
+
 (defun agent-dash-json-read (string)
   "Parse JSON STRING: objects become hash tables, arrays lists, null/false nil."
   (json-parse-string string :object-type 'hash-table :array-type 'list

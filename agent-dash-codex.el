@@ -18,6 +18,10 @@
   "Codex executable."
   :type 'string)
 
+(defcustom agent-dash-codex-directory (or (getenv "CODEX_HOME") "~/.codex/")
+  "Codex native history directory."
+  :type 'directory)
+
 (add-to-list 'agent-dash-backends 'codex t)
 
 (defconst agent-dash-codex--client
@@ -289,26 +293,84 @@ Return (ITEM-ID . WHOLE-TEXT)."
            (unless (or (string-empty-p text) (string-match-p agent-dash-codex--injected text))
              (cons text (agent-dash-jget record "timestamp")))))))))
 
+(defun agent-dash-codex--index ()
+  "Return the latest versioned native state index, or nil."
+  (let ((base (expand-file-name agent-dash-codex-directory)))
+    (when (file-directory-p base)
+      (car (sort (directory-files base t "\\`state_[0-9]+\\.sqlite\\'")
+                 (lambda (a b)
+                   (> (string-to-number (substring (file-name-base a) 6))
+                      (string-to-number (substring (file-name-base b) 6)))))))))
+
+(defun agent-dash-codex--indexed-sessions (file root)
+  "Read every native Codex session from FILE, optionally scoped to ROOT."
+  (mapcar
+   (lambda (thread)
+     (let* ((path (agent-dash-jget thread "rollout_path"))
+            (last (agent-dash-codex--last-prompt path))
+            (time (agent-dash-iso-seconds (cdr last)))
+            (source (or (agent-dash-jget thread "source") ""))
+            (case-fold-search t))
+       (list :id (agent-dash-jget thread "id") :root (agent-dash-jget thread "cwd")
+             :file path :title (agent-dash-jget thread "title")
+             :first (agent-dash-jget thread "first_user_message") :last (car last)
+             :time (or time (agent-dash-jget thread "updated_at") 0) :exact (and time t)
+             :archived (equal (agent-dash-jget thread "archived") 1)
+             :subagent (and (stringp source) (string-match-p "subagent" source))
+             :metadata-only (not (and path (file-readable-p path)))
+             :running (and (agent-dash-holder-find 'codex (agent-dash-jget thread "id")) t))))
+   (agent-dash-sqlite-rows
+    file (concat "SELECT * FROM threads"
+                 (when root (concat " WHERE cwd=" (agent-dash-sqlite-quote
+                                                   (directory-file-name
+                                                    (expand-file-name root)))))))))
+
+(defun agent-dash-codex--listed-threads (root)
+  "List all source kinds and archived states, following every page for ROOT."
+  (let (threads)
+    (dolist (archived '(:false t))
+      (let (cursor seen done)
+        (while (not done)
+          (let* ((params (append
+                          (list :limit 100 :modelProviders [] :useStateDbOnly t
+                                :sourceKinds ["cli" "vscode" "exec" "appServer" "subAgent"
+                                              "subAgentReview" "subAgentCompact"
+                                              "subAgentThreadSpawn" "subAgentOther" "unknown"]
+                                :archived archived)
+                          (when root (list :cwd (directory-file-name (expand-file-name root))))
+                          (when cursor (list :cursor cursor))))
+                 (reply (agent-dash-holder-oneshot
+                         (agent-dash-codex--command)
+                         `(("initialize" . ,agent-dash-codex--client) ("thread/list" . ,params)))))
+            (dolist (thread (agent-dash-jget reply "data"))
+              (puthash "archived" (eq archived t) thread))
+            (setq threads (append threads (agent-dash-jget reply "data"))
+                  cursor (agent-dash-jget reply "nextCursor")
+                  done (not cursor))
+            (when (member cursor seen) (error "Codex repeated a history page cursor"))
+            (when cursor (push cursor seen))))))
+    threads))
+
 (cl-defmethod agent-dash-backend-sessions ((_ (eql codex)) root)
   "Codex `agent-dash-backend-sessions' for ROOT."
-  (mapcar (lambda (thread)
-            (let* ((id (agent-dash-jget thread "id"))
-                   (file (agent-dash-jget thread "path"))
-                   (last (agent-dash-codex--last-prompt file))
-                   (time (agent-dash-iso-seconds (cdr last))))
-              (list :id id :root (agent-dash-jget thread "cwd") :file file
-                    :first (agent-dash-jget thread "preview") :title (agent-dash-jget thread "name")
-                    :last (car last)
-                    :time (or time (agent-dash-jget thread "updatedAt")) :exact (and time t)
-                    :running (and (agent-dash-holder-find 'codex id) t))))
-          (agent-dash-jget (agent-dash-holder-oneshot
-                            (agent-dash-codex--command)
-                            `(("initialize" . ,agent-dash-codex--client)
-                              ("thread/list" . ,(append '(:limit 100)
-                                                        (when root
-                                                          (list :cwd (directory-file-name
-                                                                      (expand-file-name root))))))))
-                           "data")))
+  (if-let* ((index (agent-dash-codex--index)))
+      (agent-dash-codex--indexed-sessions index root)
+    (mapcar (lambda (thread)
+              (let* ((id (agent-dash-jget thread "id"))
+                     (file (agent-dash-jget thread "path"))
+                     (last (agent-dash-codex--last-prompt file))
+                     (time (agent-dash-iso-seconds (cdr last)))
+                     (case-fold-search t))
+                (list :id id :root (agent-dash-jget thread "cwd") :file file
+                      :archived (agent-dash-jget thread "archived")
+                      :subagent (and (string-match-p
+                                      "subagent" (format "%s" (agent-dash-jget thread "source"))) t)
+                      :first (agent-dash-jget thread "preview")
+                      :title (agent-dash-jget thread "name")
+                      :last (car last)
+                      :time (or time (agent-dash-jget thread "updatedAt")) :exact (and time t)
+                      :running (and (agent-dash-holder-find 'codex id) t))))
+            (agent-dash-codex--listed-threads root))))
 
 (cl-defmethod agent-dash-backend-transcript ((_ (eql codex)) id)
   "Codex `agent-dash-backend-transcript' for ID."

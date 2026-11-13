@@ -154,12 +154,14 @@ The hub installs a function that also sees open chat buffers.")
 
 (defun agent-dash-summary-skip-reason (row)
   "Return why ROW is never summarized, or nil."
-  (let ((entry (agent-dash-summary-entry row)))
-    (unless (plist-get entry :summary)
-      (cond ((plist-get row :empty) "空会话")
-            ;; The parent session's summary already covers a subagent's work.
-            ((plist-get row :subagent) "子代理")
-            ((plist-get entry :no-dialogue) "无对话")))))
+  (if (plist-get row :archived)
+      "归档"
+    (let ((entry (agent-dash-summary-entry row)))
+      (unless (plist-get entry :summary)
+        (cond ((plist-get row :empty) "空会话")
+              ;; The parent session's summary already covers a subagent's work.
+              ((plist-get row :subagent) "子代理")
+              ((plist-get entry :no-dialogue) "无对话"))))))
 
 (defun agent-dash-summary-status (row)
   "Return the summary status of ROW."
