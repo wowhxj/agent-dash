@@ -177,6 +177,68 @@
            (with-current-buffer editor
              (let ((agent-dash-queue--saved t)) (kill-buffer)))))))))
 
+(ert-deftest agent-dash-queue-test-editor-image-commands-save-and-cancel ()
+  "Real attachment commands edit only the isolated payload until saved."
+  (agent-dash-queue-test-with-chat
+   (cl-letf (((symbol-function 'agent-dash-capability) (lambda (_s _key) t)))
+     (let ((file (make-temp-file "dash-queue-image-" nil ".png")))
+       (unwind-protect
+           (progn
+             (with-temp-buffer
+               (set-buffer-multibyte nil)
+               (insert (base64-decode-string (plist-get agent-dash-queue-test-image :data)))
+               (let ((coding-system-for-write 'no-conversion))
+                 (write-region (point-min) (point-max) file nil 'silent)))
+             (dolist (save '(nil t))
+               (let* ((entry (agent-dash-queue-add
+                              session "photo message" (list agent-dash-queue-test-image)))
+                      (editor (save-window-excursion
+                                (agent-dash-queue--edit session (plist-get entry :id)))))
+                 (unwind-protect
+                     (with-current-buffer editor
+                       (should (eq (key-binding (kbd "C-c ?")) #'agent-dash-queue-edit-help))
+                       (should (eq (key-binding (kbd "s-v")) #'agent-dash-paste-image))
+                       (should (eq (key-binding (kbd "C-c C-o")) #'agent-dash-open-image-external))
+                       (let ((system-type 'darwin) opened)
+                         (unwind-protect
+                             (cl-letf (((symbol-function 'completing-read)
+                                        (lambda (_prompt choices &rest _) (caar choices)))
+                                       ((symbol-function 'executable-find) (lambda (_) "/usr/bin/open"))
+                                       ((symbol-function 'run-at-time) #'ignore)
+                                       ((symbol-function 'call-process)
+                                        (lambda (program _in _out _display image-file)
+                                          (should (equal program "/usr/bin/open"))
+                                          (setq opened image-file)
+                                          (should (equal (agent-dash-image-bytes
+                                                          (agent-dash-image-from-file image-file))
+                                                         (agent-dash-image-bytes agent-dash-queue-test-image)))
+                                          0)))
+                               (call-interactively (key-binding (kbd "C-c C-o"))))
+                           (when opened (delete-file opened))))
+                       (should (string-search "remove image" header-line-format))
+                       (cl-letf (((symbol-function 'completing-read)
+                                  (lambda (_prompt choices &rest _) (caar choices))))
+                         (call-interactively (key-binding (kbd "C-c C-d"))))
+                       (should-not agent-dash--attachments)
+                       (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) file)))
+                         (call-interactively (key-binding (kbd "C-c C-f"))))
+                       (should (= (length agent-dash--attachments) 1))
+                       (should (equal (plist-get (car agent-dash--attachments) :name)
+                                      (file-name-nondirectory file)))
+                       (should (equal (plist-get entry :images) (list agent-dash-queue-test-image)))
+                       (should (equal (agent-dash--input) "photo message"))
+                       (if save
+                           (call-interactively (key-binding (kbd "C-c C-c")))
+                         (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                           (call-interactively (key-binding (kbd "C-c C-q")))))
+                       (should (equal (plist-get (car (plist-get entry :images)) :name)
+                                      (if save (file-name-nondirectory file) "fixture.png")))
+                       (should-not agent-dash-fake-calls))
+                   (when (buffer-live-p editor)
+                     (with-current-buffer editor
+                       (let ((agent-dash-queue--saved t)) (kill-buffer))))))))
+         (delete-file file))))))
+
 (ert-deftest agent-dash-queue-test-list-order-stable-ids-and-unsupported-steer ()
   (agent-dash-queue-test-with-chat
    (let* ((entry (agent-dash-queue-add session "keep id" nil))

@@ -566,15 +566,34 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
 (defvar agent-dash-queue-edit-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
+    (define-key map (kbd "C-c ?") #'agent-dash-queue-edit-help)
     (define-key map (kbd "C-c C-c") #'agent-dash-queue-edit-save)
     (define-key map (kbd "C-c C-q") #'agent-dash-queue-edit-cancel)
     (define-key map (kbd "C-y") #'agent-dash-paste)
-    (define-key map (kbd "s-v") #'agent-dash-paste)
+    (define-key map (kbd "s-v") #'agent-dash-paste-image)
     (define-key map (kbd "C-c C-v") #'agent-dash-paste-image)
     (define-key map (kbd "C-c C-f") #'agent-dash-attach-image)
     (define-key map (kbd "C-c C-d") #'agent-dash-remove-image)
-    (define-key map (kbd "C-c C-o") #'agent-dash-open-image)
+    (define-key map (kbd "C-c C-o") #'agent-dash-open-image-external)
     map))
+(transient-define-prefix agent-dash-queue-edit-help ()
+  "Edit a queued message's text and images without sending it."
+  ["Queue message editor · changes apply only on save"
+   ["图片附件"
+    ("a" "新增图片文件 (C-c C-f)" agent-dash-attach-image :transient t)
+    ("v" "粘贴图片 (s-v / C-c C-v)" agent-dash-paste-image :transient t)
+    ("d" "删除图片 (C-c C-d)" agent-dash-remove-image :transient t)
+    ("o" "系统图片程序打开 (C-c C-o)" agent-dash-open-image-external :transient t)]
+   ["编辑结果"
+    ("s" "保存文字和图片 (C-c C-c)" agent-dash-queue-edit-save)
+    ("q" "取消，不改原消息 (C-c C-q)" agent-dash-queue-edit-cancel)]])
+
+(defconst agent-dash-queue--editor-header
+  (concat "Queue editor · C-c C-f add image · C-c C-d remove image"
+          " · s-v paste image · C-c C-o open externally"
+          " · C-c C-c save · C-c C-q cancel · C-c ? help")
+  "Attachment and save controls for an isolated queue editor.")
+
 (define-derived-mode agent-dash-queue-edit-mode agent-dash-mode "Queue Edit"
   "Edit an isolated queue message with the shared image composer."
   ;; Do not inherit any backend-send/quit/model command from the live chat.
@@ -600,7 +619,8 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
         (setq agent-dash--attachments (copy-tree (plist-get entry :images)))
         (agent-dash--set-input (plist-get entry :text))
         (setq header-line-format
-              "Recovered NEW draft · may already have executed · save then review queue"))
+              (concat "Recovered NEW draft · may already have executed · "
+                      agent-dash-queue--editor-header)))
       buffer)))
 (defun agent-dash-queue--edit (session id)
   "Open an isolated composer for SESSION's entry ID, or a new message."
@@ -621,8 +641,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (setq-local agent-dash-queue--owner session)
       (setq-local default-directory (agent-dash-session-root session))
       (setq-local agent-dash-queue--entry-id id)
-      (setq-local header-line-format
-                  "Queue editor · C-c C-c save · C-c C-q cancel · C-c C-f add image")
+      (setq-local header-line-format agent-dash-queue--editor-header)
       (setq-local mode-line-format '(" Queue edit (not sent)"))
       (setq-local agent-dash--input-start (copy-marker (point-min)))
       (setq-local agent-dash--transcript-end (copy-marker (point-min)))

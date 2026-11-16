@@ -32,6 +32,8 @@ Providers may impose smaller limits."
 (defvar-local agent-dash--last-image-draft nil "Last image submission, for explicit recovery.")
 (defvar-local agent-dash--image-cache nil "Decoded thumbnail cache for this chat.")
 (defvar-local agent-dash--failed-image-drafts nil "Failed submissions awaiting explicit recovery.")
+(declare-function w32-shell-execute "ext:w32fns.c"
+                  (operation document &optional parameters show-flag))
 (declare-function agent-dash--input "agent-dash-ui" ())
 (declare-function agent-dash--set-input "agent-dash-ui" (text))
 (declare-function agent-dash--decorate-input "agent-dash-ui" ())
@@ -290,6 +292,29 @@ Remote URLs remain placeholders.  No network requests are made here."
       (setq buffer-read-only t)
       (set-buffer-modified-p nil))
     (pop-to-buffer buffer)))
+
+(defun agent-dash-open-image-external ()
+  "Open a staged image with the system default application, without changing it."
+  (interactive)
+  (let* ((image (agent-dash-image--choose "Open image externally: "))
+         (bytes (agent-dash-image-bytes image))
+         (program (unless (eq system-type 'windows-nt)
+                    (or (executable-find (if (eq system-type 'darwin) "open" "xdg-open"))
+                        (user-error "No system file opener is available"))))
+         (file (make-temp-file "agent-dash-image-" nil
+                               (concat "." (cadr (split-string
+                                                  (plist-get image :mime-type) "/"))))))
+    (condition-case err
+        (progn
+          (let ((coding-system-for-write 'no-conversion))
+            (write-region bytes nil file nil 'silent))
+          (if (eq system-type 'windows-nt)
+              (w32-shell-execute "open" file)
+            (unless (eq 0 (call-process program nil nil nil file))
+              (user-error "System image viewer could not open the image")))
+          ;; The viewer may read lazily; retain the private copy for one hour.
+          (run-at-time 3600 nil (lambda () (when (file-exists-p file) (delete-file file)))))
+      (error (delete-file file) (signal (car err) (cdr err))))))
 
 (defun agent-dash-restore-image-draft (&optional draft)
   "Restore DRAFT, or choose a failed/recent image draft, without sending it.
