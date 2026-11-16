@@ -311,19 +311,47 @@ Return (ITEM-ID . WHOLE-TEXT)."
   "\\`\\(?:<environment_context>\\|<user_instructions>\\|# AGENTS\\.md\\)"
   "Start of context Codex injects as a user message.")
 
+(defun agent-dash-codex--rollout-file (file)
+  "Resolve FILE to its compressed sibling when the original rollout is absent."
+  (if (and (stringp file) (not (file-readable-p file))
+           (file-readable-p (concat file ".zst")))
+      (concat file ".zst")
+    file))
+
+(defun agent-dash-codex--prompt-record (line)
+  "Return (TEXT . TIMESTAMP) if LINE is a real Codex user message."
+  (when (string-match-p "\"role\"[ \t]*:[ \t]*\"user\"" line)
+    (let* ((record (agent-dash-json-read line))
+           (payload (agent-dash-jget record "payload"))
+           (text (string-trim
+                  (mapconcat (lambda (c) (or (agent-dash-jget c "text") ""))
+                             (agent-dash-jget payload "content") ""))))
+      (when (and (equal (agent-dash-jget payload "role") "user")
+                 (not (string-empty-p text))
+                 (not (string-match-p agent-dash-codex--injected text)))
+        (cons text (agent-dash-jget record "timestamp"))))))
+
 (defun agent-dash-codex--last-prompt (file)
   "Return (TEXT . TIMESTAMP) of the latest user prompt in rollout FILE, or nil."
+  (setq file (agent-dash-codex--rollout-file file))
   (when (and (stringp file) (file-readable-p file))
-    (agent-dash-file-find-last
-     file
-     (lambda (line)
-       (when (string-search "\"role\":\"user\"" line)
-         (let* ((record (agent-dash-json-read line))
-                (text (string-trim
-                       (mapconcat (lambda (c) (or (agent-dash-jget c "text") ""))
-                                  (agent-dash-jget record "payload" "content") ""))))
-           (unless (or (string-empty-p text) (string-match-p agent-dash-codex--injected text))
-             (cons text (agent-dash-jget record "timestamp")))))))))
+    (if (not (string-suffix-p ".zst" file))
+        (agent-dash-file-find-last file #'agent-dash-codex--prompt-record)
+      (if-let* ((zstd (executable-find "zstd")))
+          (with-temp-buffer
+            (unless (eq 0 (call-process zstd nil t nil "-dc" "--" file))
+              (error "Cannot decompress Codex rollout %s" file))
+            (goto-char (point-max))
+            (let (found)
+              (while (and (not found) (> (point) (point-min)))
+                (let ((end (point)))
+                  (forward-line -1)
+                  (setq found (agent-dash-codex--prompt-record
+                               (buffer-substring-no-properties (point) end)))))
+              found))
+        (push "Codex: zstd is needed to read compressed rollouts"
+              agent-dash-history-warnings)
+        nil))))
 
 (defun agent-dash-codex--index ()
   "Return the latest versioned native state index, or nil."
@@ -338,7 +366,8 @@ Return (ITEM-ID . WHOLE-TEXT)."
   "Read every native Codex session from FILE, optionally scoped to ROOT."
   (mapcar
    (lambda (thread)
-     (let* ((path (agent-dash-jget thread "rollout_path"))
+     (let* ((path (agent-dash-codex--rollout-file
+                   (agent-dash-jget thread "rollout_path")))
             (last (agent-dash-codex--last-prompt path))
             (time (agent-dash-iso-seconds (cdr last)))
             (source (or (agent-dash-jget thread "source") ""))
@@ -389,7 +418,8 @@ Return (ITEM-ID . WHOLE-TEXT)."
       (agent-dash-codex--indexed-sessions index root)
     (mapcar (lambda (thread)
               (let* ((id (agent-dash-jget thread "id"))
-                     (file (agent-dash-jget thread "path"))
+                     (file (agent-dash-codex--rollout-file
+                            (agent-dash-jget thread "path")))
                      (last (agent-dash-codex--last-prompt file))
                      (time (agent-dash-iso-seconds (cdr last)))
                      (case-fold-search t))

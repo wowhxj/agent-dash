@@ -532,6 +532,7 @@ Keep pre-compaction messages, but never replay abandoned branches."
              (last (agent-dash-file-find-last file #'agent-dash-pi--user-entry))
              (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
         (list :id id :root (agent-dash-jget header "cwd") :file file
+              :subagent (and (agent-dash-jget header "parentSession") t)
               :first (and first (agent-dash-pi--entry-text first))
               :last (and last (agent-dash-pi--entry-text last))
               :time (or time (agent-dash-mtime file)) :exact (and time t)

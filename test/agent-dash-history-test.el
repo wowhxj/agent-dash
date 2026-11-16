@@ -7,12 +7,14 @@
 (require 'ert)
 (require 'agent-dash)
 
-(defun agent-dash-history-test--pi-file (base path id root)
-  "Write a minimal session ID under BASE/PATH with metadata ROOT."
+(defun agent-dash-history-test--pi-file (base path id root &optional parent-session)
+  "Write a minimal session ID under BASE/PATH with metadata ROOT and PARENT-SESSION."
   (let ((file (expand-file-name path base)))
     (make-directory (file-name-directory file) t)
     (with-temp-file file
-      (insert (json-serialize (list :type "session" :id id :cwd root)) "\n")
+      (insert (json-serialize (append (list :type "session" :id id :cwd root)
+                                      (when parent-session
+                                        (list :parentSession parent-session)))) "\n")
       (insert (json-serialize (list :type "message" :id "u" :parentId nil
                                     :timestamp "2026-01-01T00:00:00Z"
                                     :message '(:role "user" :content "prompt"))) "\n"))
@@ -33,14 +35,16 @@
           (agent-dash-history-test--pi-file base "--old--/date_legacy.jsonl"
                                             "legacy" "/tmp/project")
           (agent-dash-history-test--pi-file base "--old--/parent/child/run-0/date_child.jsonl"
-                                            "child" "/tmp/other")
+                                            "child" "/tmp/other" "parent")
           (with-temp-file (expand-file-name "broken.jsonl" base) (insert "not JSON\n"))
           (with-temp-file (expand-file-name "events.jsonl" base) (insert "{\"type\":\"event\"}\n"))
           (should (= (length (agent-dash-backend-sessions 'pi nil)) 3))
           (should (= (length agent-dash-history-warnings) 1))
           (should (= (length (agent-dash-backend-sessions 'pi "/tmp/project/")) 2))
-          (should (equal (plist-get (car (agent-dash-backend-sessions 'pi "/tmp/other")) :id)
-                         "child"))
+          (let ((child (car (agent-dash-backend-sessions 'pi "/tmp/other"))))
+            (should (equal (plist-get child :id) "child"))
+            (should (plist-get child :subagent))
+            (should (equal (agent-dash-summary-skip-reason child) "子代理")))
           (dolist (id '("flat" "legacy" "child"))
             (should (agent-dash-pi--file id))
             (should (equal (agent-dash-backend-transcript 'pi id) '((user . "prompt")))))
@@ -48,6 +52,35 @@
           (write-region "{\"message\":{\"role\":\"user\"}\n" nil
                         (expand-file-name "flat.jsonl" base) t 'silent)
           (should (= (length (agent-dash-backend-sessions 'pi nil)) 3)))
+      (delete-directory base t))))
+
+(ert-deftest agent-dash-history-test-codex-last-prompt-compressed-and-plain ()
+  (unless (executable-find "zstd") (ert-skip "zstd is not installed"))
+  (let* ((base (make-temp-file "dash-rollout-" t))
+         (file (expand-file-name "rollout.jsonl" base))
+         (compressed (concat file ".zst"))
+         (expected '("latest 用户消息" . "2026-01-02T00:00:00Z")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"text\":\"first\"}]}}\n")
+            (insert "{\"timestamp\":\"2026-01-02T00:00:00Z\",\"payload\":{\"role\": \"user\",\"content\":[{\"text\":\"latest 用户消息\"}]}}\n")
+            (insert "{\"payload\":{\"role\":\"user\",\"content\":[{\"text\":\"<environment_context>injected\"}]}}\n")
+            (insert "{\"payload\":{\"role\":\"assistant\",\"content\":[{\"text\":\"answer\"}]}}\n"))
+          (should (equal (agent-dash-codex--last-prompt file) expected))
+          (should (eq 0 (call-process "zstd" nil nil nil "-q" file "-o" compressed)))
+          ;; Prefer the original when both exist; resolve stale index paths otherwise.
+          (should (equal (agent-dash-codex--rollout-file file) file))
+          (delete-file file)
+          (should (equal (agent-dash-codex--rollout-file file) compressed))
+          (should (equal (agent-dash-codex--last-prompt file) expected))
+          (should (equal (agent-dash-codex--last-prompt compressed) expected))
+          (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+            (let (agent-dash-history-warnings)
+              (should-not (agent-dash-codex--last-prompt file))
+              (should agent-dash-history-warnings)))
+          (should-not (agent-dash-codex--last-prompt nil))
+          (should-not (agent-dash-codex--last-prompt (concat base "/missing"))))
       (delete-directory base t))))
 
 (ert-deftest agent-dash-history-test-sqlite-readonly-and-quoting ()
