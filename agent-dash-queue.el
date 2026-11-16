@@ -362,7 +362,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (setq agent-dash-queue--owner session)
       (setq-local default-directory (agent-dash-session-root session))
       (agent-dash-queue--render))
-    (pop-to-buffer buffer)))
+    (agent-dash-pop-to-buffer buffer)))
 (defun agent-dash-queue--render ()
   "Render compact Steer/Follow groups, retaining the selected stable ID."
   (interactive)
@@ -546,13 +546,14 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (setf (agent-dash-session-state session) 'dead)
       (setq buffer (agent-dash--setup-buffer session))
       (with-current-buffer buffer (agent-dash-refresh-chat)))
-    (pop-to-buffer buffer)))
+    (agent-dash-pop-to-buffer buffer)))
 (defun agent-dash-queue-view ()
   "Read a selected local or native message without making it editable."
   (interactive)
   (let* ((native (get-text-property (point) 'agent-dash-native-text))
          (entry (if native (list :text native :kind 'native :status 'backend)
                   (agent-dash-queue-entry agent-dash-queue--owner (agent-dash-queue--selected)))))
+    (agent-dash-select-tab)
     (with-help-window "*agent-queue-message*"
       (princ (format "%s · %s · images: %s\n\n%s"
                      (plist-get entry :kind) (plist-get entry :status)
@@ -653,7 +654,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (set-buffer-modified-p nil))
     (when entry (plist-put entry :editor buffer))
     (agent-dash-queue--touch session)
-    (pop-to-buffer buffer)
+    (agent-dash-pop-to-buffer buffer)
     buffer))
 (defun agent-dash-queue--editor-query ()
   "Confirm abandoning edits, including image-only changes."

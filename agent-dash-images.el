@@ -291,7 +291,7 @@ Remote URLs remain placeholders.  No network requests are made here."
       (image-mode)
       (setq buffer-read-only t)
       (set-buffer-modified-p nil))
-    (pop-to-buffer buffer)))
+    (agent-dash-pop-to-buffer buffer)))
 
 (defun agent-dash-open-image-external ()
   "Open a staged image with the system default application, without changing it."

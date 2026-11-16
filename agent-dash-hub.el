@@ -557,9 +557,8 @@ Candidates keep the list order and show the table header as their group."
 ;;;; Session commands
 
 (defun agent-dash-hub--show (buffer)
-  "Show BUFFER filling the frame."
-  (pop-to-buffer buffer)
-  (delete-other-windows))
+  "Show BUFFER in the agent workspace without hiding other windows."
+  (agent-dash-pop-to-buffer buffer))
 
 (defun agent-dash-hub-open-row (row)
   "Open ROW: switch to its live chat, or resume it."
@@ -569,8 +568,7 @@ Candidates keep the list order and show the table header as their group."
       (when (plist-get row :missing)
         (user-error "项目目录不存在：%s；按 D 重定向" (plist-get row :root)))
       (agent-dash-open (plist-get row :backend) (or (plist-get row :root) default-directory)
-                       (plist-get row :id))
-      (delete-other-windows))))
+                       (plist-get row :id)))))
 
 (defun agent-dash-hub-open ()
   "Open the session at point, or switch to its live chat."
@@ -591,8 +589,7 @@ Candidates keep the list order and show the table header as their group."
     (setq directory (file-name-as-directory (expand-file-name directory)))
     (when (file-remote-p directory) (user-error "请选择本地项目目录"))
     (unless (file-directory-p directory) (make-directory directory t))
-    (agent-dash-open backend directory)
-    (delete-other-windows)))
+    (agent-dash-open backend directory)))
 
 (defun agent-dash-hub-copy-id ()
   "Copy the full session id at point."
@@ -676,6 +673,7 @@ Candidates keep the list order and show the table header as their group."
   "Show source failures and the summary scheduler state."
   (interactive)
   (let ((visible (length (agent-dash-hub--visible))) (total (length (agent-dash-hub--all))))
+    (agent-dash-select-tab)
     (with-help-window "*agent-dash diagnostics*"
       (princ (format "显示 %d/已载入 %d；过滤/隐藏 %d。\n\n" visible total (- total visible)))
       (dolist (backend agent-dash-backends)
@@ -695,13 +693,12 @@ Candidates keep the list order and show the table header as their group."
                          (plist-get (agent-dash-summary-entry row) :failures))))))))
 
 (defun agent-dash-hub-quit ()
-  "Restore the window layout from before the hub."
+  "Leave the `agent-dash' tab without closing its buffers."
   (interactive)
-  (let ((configuration (frame-parameter nil 'agent-dash-hub-windows)))
-    (set-frame-parameter nil 'agent-dash-hub-windows nil)
-    (if (window-configuration-p configuration)
-        (set-window-configuration configuration)
-      (quit-window))))
+  (if (and (equal (alist-get 'name (tab-bar--current-tab)) "agent-dash")
+           (cdr (tab-bar-tabs)))
+      (tab-bar-switch-to-recent-tab)
+    (quit-window)))
 
 ;;;; Details
 
@@ -1056,7 +1053,7 @@ f 会话视图菜单；a Agent 筛选；P 项目筛选；l 仅存活；f h 显�
 t 时间倒序/项目分组；f g 按 Agent 分组；c 恢复默认；TAB 折叠/展开；g 刷新。
 i 详情/对话；s 语义搜索/问答；r 生成摘要；R 重试失败摘要（需 `agent-dash-summary-mode'）。
 d 标记删除；u 取消；x 执行删除（Claude/Pi）；D 项目目录重定向；! 诊断。
-w 复制 ID；W 复制项目；q 恢复窗口布局；? 命令菜单。
+w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
 列：D=待删除，●=后台实例或已打开；日期 * 表示来源时间，不是消息时间。
 
 \\{agent-dash-hub-mode-map}"
@@ -1073,14 +1070,11 @@ w 复制 ID；W 复制项目；q 恢复窗口布局；? 命令菜单。
 ;; Autoload the main file, which loads every backend, not just this one.
 ;;;###autoload (autoload 'agent-dash-hub "agent-dash" "List the saved sessions of every agent." t)
 (defun agent-dash-hub ()
-  "List the saved sessions of every agent, filling the frame.
-q restores the previous window layout."
+  "List saved sessions in the `agent-dash' tab alongside agent chats.
+Reuse the existing tab, hub buffer and window.  q returns to the previous tab."
   (interactive)
   (let ((buffer (get-buffer-create "*agent-dash hub*")))
-    (unless (and (get-buffer-window buffer) (frame-parameter nil 'agent-dash-hub-windows))
-      (set-frame-parameter nil 'agent-dash-hub-windows (current-window-configuration)))
-    (switch-to-buffer buffer)
-    (delete-other-windows)
+    (agent-dash-hub--show buffer)
     (unless (derived-mode-p 'agent-dash-hub-mode) (agent-dash-hub-mode))
     (agent-dash-hub-refresh)))
 

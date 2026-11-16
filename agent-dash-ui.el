@@ -613,15 +613,25 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (when (agent-dash-queue-managed-p s) (agent-dash-queue-disconnect s))
     (setq agent-dash--sessions (delq s agent-dash--sessions))
     (unless agent-dash--quitting
-      (agent-dash-backend-detach (agent-dash-session-backend s) s))))
+      (agent-dash-backend-detach (agent-dash-session-backend s) s)))
+  (dolist (window (get-buffer-window-list (current-buffer) nil (selected-frame)))
+    (if (one-window-p t)
+        (when-let* ((hub (get-buffer "*agent-dash hub*")))
+          (set-window-buffer window hub))
+      (delete-window window))))
 
 (defun agent-dash-open (backend root &optional resume-id)
   "Open a chat with BACKEND in ROOT, resuming RESUME-ID if non-nil.
 Return the session."
   (let* ((session (agent-dash-session-create backend root))
          (buffer (agent-dash--setup-buffer session)))
+    (condition-case err
+        (agent-dash-pop-to-buffer buffer)
+      (error
+       (with-current-buffer buffer
+         (let ((agent-dash--quitting t)) (kill-buffer)))
+       (signal (car err) (cdr err))))
     (agent-dash-backend-start backend session resume-id)
-    (pop-to-buffer buffer)
     (goto-char (point-max))
     session))
 
@@ -817,7 +827,7 @@ Return the session."
   (let ((names (mapcar (lambda (s) (buffer-name (agent-dash-session-buffer s)))
                        agent-dash--sessions)))
     (unless names (user-error "No chats"))
-    (pop-to-buffer (completing-read "Chat: " names nil t))))
+    (agent-dash-pop-to-buffer (completing-read "Chat: " names nil t))))
 
 (defun agent-dash-select-model ()
   "Switch this chat's model."

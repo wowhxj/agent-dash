@@ -125,7 +125,7 @@ Saved user/assistant image blocks render on replay; tool images appear when thei
 
 History discovery includes Pi's flat, project and nested JSONL layouts, Codex's latest native state index (including archived/subagent/metadata-only threads), DSH's empty sessions, and Hermes CLI history from its native index. Empty, internal and archived sessions count as loaded and are then filtered by the hub. Codex and Hermes index reads require `sqlite3` and use `-readonly`; Codex falls back to a paginated, all-source app-server listing when no index exists. Native stores are not modified. Use `!` for per-source read warnings.
 
-`M-x agent-dash-hub` fills the frame with every saved session, grouped by project. Columns: agent, `●` live, date (`*` = source time, not a message time), short ID, project, summary (falls back to the first prompt), latest prompt, summary status.
+`M-x agent-dash-hub` creates or selects the current frame's dedicated `agent-dash` tab and reuses the hub buffer and window without changing file tabs' window layouts. Chats, details, search, queues and image previews reuse their visible window or split an existing window in the same frame, preserving other agents instead of replacing them or opening another frame. If no split fits, enlarge the frame or close unneeded windows. Quitting a chat with `C-c C-q` or `/quit` also closes its split; cancelling quit preserves it. The last window never deletes the frame and shows the existing hub when available. Press `q` in the hub to return to the most recently used other tab without closing the workspace or its sessions. Buffers remain globally shared in Emacs; manually displaying them in other tabs is not restricted. The hub lists every saved session, grouped by project. Columns: agent, `●` live, date (`*` = source time, not a message time), short ID, project, summary (falls back to the first prompt), latest prompt, summary status.
 
 | Key | Action |
 |---|---|
@@ -141,7 +141,7 @@ History discovery includes Pi's flat, project and nested JSONL layouts, Codex's 
 | `d` / `u` / `x` | Mark / unmark / delete marked sessions (Claude, Pi) |
 | `D` | Relocate a moved project directory |
 | `w` / `W` | Copy ID / project |
-| `!` / `?` / `q` | Diagnostics / command menu / restore the window layout |
+| `!` / `?` / `q` | Diagnostics / command menu / return to the previous tab |
 
 ### Summaries and existing ashub data
 

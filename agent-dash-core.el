@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'iso8601)
+(require 'tab-bar)
 
 (defgroup agent-dash nil
   "Native agent clients and cross-agent session hub."
@@ -37,6 +38,43 @@ ITEM is nil when only session-level state (run, queue, meta) changed.")
   (items nil) (index (make-hash-table :test #'equal))
   (state 'idle) (queue nil) (meta nil) (requests nil)
   (data nil))
+
+(defun agent-dash-select-tab ()
+  "Select the current frame's `agent-dash' tab; return t if newly created."
+  (unless (equal (alist-get 'name (tab-bar--current-tab)) "agent-dash")
+    (if (seq-some (lambda (tab) (equal (alist-get 'name tab) "agent-dash"))
+                  (tab-bar-tabs))
+        (progn (tab-bar-switch-to-tab "agent-dash") nil)
+      (let ((tab-bar-new-tab-choice t))
+        (tab-bar-new-tab))
+      (tab-bar-rename-tab "agent-dash")
+      t)))
+
+(defun agent-dash-pop-to-buffer (buffer)
+  "Show BUFFER in the current frame's `agent-dash' tab.
+Reuse its visible window, otherwise split the largest window's longer
+pixel dimension without replacing other buffers.  Never create another
+frame; signal an error when no window can be split."
+  (let* ((new-tab (agent-dash-select-tab))
+         (buffer (get-buffer-create buffer))
+         (window
+          (or (get-buffer-window buffer (selected-frame))
+              (and new-tab (selected-window))
+              (let* ((largest (get-largest-window (selected-frame)))
+                     (split-width-threshold 0)
+                     (split-height-threshold 0)
+                     (wide (> (window-pixel-width largest)
+                              (window-pixel-height largest))))
+                (cond
+                 ((and wide (window-splittable-p largest t))
+                  (split-window largest nil 'right))
+                 ((window-splittable-p largest) (split-window largest nil 'below))
+                 ((window-splittable-p largest t) (split-window largest nil 'right))
+                 (t (user-error "当前 frame 空间不足，请扩大窗口或关闭不需要的分屏")))))))
+    (unless (eq (window-buffer window) buffer)
+      (window--display-buffer buffer window (if new-tab 'reuse 'window)))
+    (select-window window)
+    buffer))
 
 (defun agent-dash-uuid ()
   "Return a random version-4 UUID string."
