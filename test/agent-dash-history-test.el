@@ -101,6 +101,17 @@
                                     (secure-hash 'sha256 (current-buffer)))))))
       (delete-file file))))
 
+(ert-deftest agent-dash-history-test-sqlite-errors-include-original-reason ()
+  "A failed query must report SQLite's reason, not just the database path."
+  (let ((file (make-temp-file "dash-sqlite-error-" nil ".sqlite")))
+    (unwind-protect
+        (progn
+          (agent-dash-history-test--database file "CREATE TABLE present(id TEXT);")
+          (let ((failure (should-error (agent-dash-sqlite-rows file "SELECT * FROM missing"))))
+            (should (string-match-p "Cannot read history index" (error-message-string failure)))
+            (should (string-match-p "no such table: missing" (error-message-string failure)))))
+      (delete-file file))))
+
 (ert-deftest agent-dash-history-test-codex-native-index-includes-metadata-only ()
   (let* ((base (make-temp-file "dash-codex-" t))
          (agent-dash-codex-directory base)

@@ -89,16 +89,25 @@ frame; signal an error when no window can be split."
 
 (defun agent-dash-sqlite-rows (file query)
   "Read QUERY rows from existing SQLite FILE without opening it for writing.
-Use the sqlite3 CLI with separate arguments, never shell interpolation."
+Use the sqlite3 CLI with separate arguments, never shell interpolation.
+Report stderr on failure, without mixing it into successful JSON output."
   (unless (file-readable-p file) (user-error "History index is not readable: %s" file))
   (let ((sqlite (or (executable-find "sqlite3")
-                    (user-error "SQLite3 is required to read native session history"))))
-    (with-temp-buffer
-      (unless (zerop (process-file sqlite nil (list (current-buffer) nil) nil
-                                   "-readonly" "-json" file query))
-        (error "Cannot read history index %s" file))
-      (unless (string-blank-p (buffer-string))
-        (agent-dash-json-read (buffer-string))))))
+                    (user-error "SQLite3 is required to read native session history")))
+        (stderr (make-temp-file "agent-dash-sqlite-")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((status (process-file sqlite nil (list (current-buffer) stderr) nil
+                                      "-readonly" "-json" file query)))
+            (unless (eq status 0)
+              (let ((reason (with-temp-buffer
+                              (insert-file-contents stderr)
+                              (string-trim (buffer-string)))))
+                (error "Cannot read history index %s (sqlite3 exit %s): %s"
+                       file status (if (string-empty-p reason) "No error output" reason)))))
+          (unless (string-blank-p (buffer-string))
+            (agent-dash-json-read (buffer-string))))
+      (delete-file stderr))))
 
 (defun agent-dash-sqlite-quote (text)
   "Return TEXT as a safely quoted SQLite string literal."
