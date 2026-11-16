@@ -90,15 +90,17 @@ is written after the log reader has drained the agent's output.")
     (unless (agent-dash-holder-pid dir)
       (error "Agent holder did not start; see %s" (agent-dash-holder--file dir "err")))))
 
-(defun agent-dash-holder--lines (session on-record)
-  "Return a process filter that calls ON-RECORD with SESSION per JSON line."
-  (let ((pending ""))
+(defun agent-dash-holder--lines (session on-record &optional replay-bytes)
+  "Call ON-RECORD with SESSION per JSON line; first REPLAY-BYTES are history."
+  (let ((pending "") (remaining (or replay-bytes 0)))
     (lambda (_process chunk)
       (setq pending (concat pending chunk))
       (let ((start 0) end)
         (while (setq end (string-search "\n" pending start))
-          (let ((line (string-trim-right (substring pending start end) "\r")))
-            (setq start (1+ end))
+          (let ((line (string-trim-right (substring pending start end) "\r"))
+                (agent-dash-replaying (> remaining 0)))
+            (setq remaining (- remaining (string-bytes (substring pending start (1+ end))))
+                  start (1+ end))
             (unless (string-empty-p line)
               ;; One bad record must not drop the rest of the chunk.
               (condition-case err
@@ -114,14 +116,15 @@ is written after the log reader has drained the agent's output.")
   "Follow holder DIR for SESSION, calling ON-RECORD with each parsed record.
 Read the whole log when FROM-START, else only records written from now."
   (let* ((log (agent-dash-holder--file dir "out.jsonl"))
-         (offset (if from-start 0 (file-attribute-size (file-attributes log)))))
+         (size (file-attribute-size (file-attributes log)))
+         (offset (if from-start 0 size)))
     (agent-dash-set-data session :holder dir)
     (agent-dash-set-data
      session :tail
      (make-process :name "agent-dash-tail" :noquery t :connection-type 'pipe
                    :coding 'utf-8-unix
                    :command (list "tail" "-c" (format "+%d" (1+ offset)) "-f" log)
-                   :filter (agent-dash-holder--lines session on-record)
+                   :filter (agent-dash-holder--lines session on-record (if from-start size 0))
                    :sentinel #'ignore))))
 
 (defun agent-dash-holder-write (session object)

@@ -132,12 +132,15 @@ A change of kind, or a tool call in between, starts a new item."
              (when-let* ((sid (agent-dash-jget result "sessionId")))
                (unless (agent-dash-data session :sid) (agent-dash-holder-set-sid session sid)))
              (when-let* ((reason (agent-dash-jget result "stopReason")))
-               (agent-dash-emit session '(:type run :state idle))
+               (agent-dash-emit session
+                                (list :type 'run :state 'idle
+                                      :outcome (if (equal reason "cancelled")
+                                                   'cancelled 'ended)))
                (unless (equal reason "end_turn")
                  (agent-dash-emit session
                                   (list :type 'notice :text (format "stopped: %s" reason)))))
              (when-let* ((error (agent-dash-jget record "error" "message")))
-               (agent-dash-emit session '(:type run :state idle))
+               (agent-dash-emit session '(:type run :state idle :outcome error))
                (agent-dash-emit session (list :type 'notice :level 'error :text error))))))
         ((equal method "session/update")
          (agent-dash-hermes--update session (agent-dash-jget params "update")))

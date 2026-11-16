@@ -192,7 +192,15 @@ Return (ITEM-ID . WHOLE-TEXT)."
            (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
          (when-let* ((error (agent-dash-jget params "turn" "error" "message")))
            (agent-dash-emit session (list :type 'notice :level 'error :text error)))
-         (agent-dash-emit session '(:type run :state idle)))
+         (agent-dash-emit session
+                          (list :type 'run :state 'idle
+                                :outcome (cond
+                                          ((equal (agent-dash-jget params "turn" "status")
+                                                  "interrupted") 'cancelled)
+                                          ((or (agent-dash-jget params "turn" "error")
+                                               (equal (agent-dash-jget params "turn" "status")
+                                                      "failed")) 'error)
+                                          (t 'ended)))))
         ((or "item/started" "item/completed")
          (agent-dash-codex--item session (agent-dash-jget params "item")))
         ("item/agentMessage/delta"
