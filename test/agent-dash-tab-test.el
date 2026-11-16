@@ -294,29 +294,133 @@
          (kill-buffer first)
          (kill-buffer second))))))
 
-(ert-deftest agent-dash-tab-test-splits-largest-not-selected-window ()
-  "Repeated additions subdivide the largest window, leaving smaller ones alone."
-  (agent-dash-tab-test-with-tabs
-   (let ((first (generate-new-buffer " *dash largest first*"))
-         (next (generate-new-buffer " *dash largest next*")))
+(defmacro agent-dash-tab-test-with-wide-frame (&rest body)
+  "Run BODY in an isolated, physically wide test frame."
+  (declare (indent 0))
+  `(agent-dash-tab-test-with-tabs
+    (let ((width (frame-width)) (height (frame-height)))
+      (unwind-protect
+          (progn (set-frame-size (selected-frame) 160 80) ,@body)
+        (set-frame-size (selected-frame) width height)))))
+
+(ert-deftest agent-dash-tab-test-additions-reflow-into-grid ()
+  "Two and three windows form equal columns; four form a cross."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((buffers (cl-loop repeat 4 collect (generate-new-buffer " *dash grid*"))))
      (unwind-protect
          (progn
-           (agent-dash-pop-to-buffer first)
-           (let* ((small (selected-window))
-                  (large (split-window small 20 'right))
-                  (small-edges (window-edges small)))
-             (should (eq (get-largest-window (selected-frame)) large))
-             (dotimes (_ 2)
-               (let ((largest (get-largest-window (selected-frame))))
-                 (select-window small)
-                 (agent-dash-pop-to-buffer next)
-                 (should (eq (window-parent (selected-window))
-                             (window-parent largest)))
-                 (should (equal (window-edges small) small-edges))
-                 ;; A native quit removes only the newly created split.
-                 (quit-window)))))
-       (kill-buffer first)
-       (kill-buffer next)))))
+           (dolist (buffer buffers)
+             (agent-dash-pop-to-buffer buffer)
+             (should (eq (window-buffer) buffer))
+             (when (memq (length (window-list)) '(2 3))
+               (let ((widths (mapcar #'window-total-width (window-list))))
+                 (should (<= (- (apply #'max widths) (apply #'min widths)) 1)))))
+           (let ((edges (mapcar #'window-edges (window-list))))
+             (should (= (length (delete-dups (mapcar #'car edges))) 2))
+             (should (= (length (delete-dups (mapcar #'cadr edges))) 2)))
+           (dolist (buffer buffers) (should (get-buffer-window buffer))))
+       (mapc #'kill-buffer buffers)))))
+
+(ert-deftest agent-dash-tab-test-native-deletion-and-manual-resize ()
+  "Native deletion reflows; focus and manual size changes do not."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((buffers (cl-loop repeat 4 collect (generate-new-buffer " *dash delete*"))))
+     (unwind-protect
+         (progn
+           (mapc #'agent-dash-pop-to-buffer buffers)
+           (delete-window)
+           ;; Batch mode has no redisplay: run the same native hook explicitly.
+           (run-hooks 'window-configuration-change-hook)
+           (let ((edges (mapcar #'window-edges (window-list))))
+             (should (= (length (delete-dups (mapcar #'car edges))) 3))
+             (should (= (length (delete-dups (mapcar #'cadr edges))) 1)))
+           (other-window 1)
+           (window-resize (selected-window) 5 t)
+           (let ((state (window-state-get)))
+             (run-hooks 'window-configuration-change-hook)
+             (should (equal state (window-state-get))))
+           (delete-other-windows)
+           (run-hooks 'window-configuration-change-hook)
+           (should (= (length (window-list)) 1)))
+       (mapc #'kill-buffer buffers)))))
+
+(ert-deftest agent-dash-tab-test-reflow-preserves-view-and-quit ()
+  "Rebuilding the tree preserves views and remaps native quit destinations."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((buffers (cl-loop repeat 3 collect (generate-new-buffer " *dash views*")))
+         (details (generate-new-buffer " *dash transient*")))
+     (unwind-protect
+         (progn
+           (mapc #'agent-dash-pop-to-buffer buffers)
+           (with-current-buffer (car buffers)
+             (dotimes (_ 200) (insert "A line of chat history\n")))
+           (let ((window (get-buffer-window (car buffers))))
+             (set-window-point window 300)
+             (set-window-start window 100)
+             (set-window-hscroll window 4))
+           (agent-dash-pop-to-buffer (cadr buffers))
+           (agent-dash-pop-to-buffer details)
+           (let ((window (get-buffer-window (car buffers))))
+             (should (= (window-point window) 300))
+             (should (= (window-start window) 100))
+             (should (= (window-hscroll window) 4)))
+           (quit-window)
+           (run-hooks 'window-configuration-change-hook)
+           (should-not (get-buffer-window details))
+           (should (eq (window-buffer) (cadr buffers)))
+           (should (= (length (window-list)) 3)))
+       (mapc #'kill-buffer (cons details buffers))))))
+
+(ert-deftest agent-dash-tab-test-native-addition-and-frame-resize ()
+  "Native splits and frame geometry changes use the same reflow hook."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((buffers (cl-loop repeat 3 collect (generate-new-buffer " *dash resize*"))))
+     (unwind-protect
+         (progn
+           (mapc #'agent-dash-pop-to-buffer buffers)
+           (split-window-right)
+           (run-hooks 'window-configuration-change-hook)
+           (let ((edges (mapcar #'window-edges (window-list))))
+             (should (= (length (delete-dups (mapcar #'car edges))) 2))
+             (should (= (length (delete-dups (mapcar #'cadr edges))) 2)))
+           (set-frame-size (selected-frame) 80 160)
+           (run-hooks 'window-configuration-change-hook)
+           (let ((edges (mapcar #'window-edges (window-list))))
+             (should (= (length (delete-dups (mapcar #'car edges))) 1))
+             (should (= (length (delete-dups (mapcar #'cadr edges))) 4)))
+           (should (= (length (get-buffer-window-list (car (last buffers)))) 2)))
+       (mapc #'kill-buffer buffers)))))
+
+(ert-deftest agent-dash-tab-test-reflow-is-tab-local ()
+  "The global native hook leaves other tabs' windows and sizes untouched."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((buffer (generate-new-buffer " *dash isolation*")))
+     (unwind-protect
+         (progn
+           (agent-dash-pop-to-buffer buffer)
+           (tab-bar-switch-to-tab "files")
+           (split-window-right 35)
+           (split-window-below 20)
+           (let ((state (window-state-get)))
+             (run-hooks 'window-configuration-change-hook)
+             (should (equal state (window-state-get)))))
+       (kill-buffer buffer)))))
+
+(ert-deftest agent-dash-tab-test-reflow-rollback-on-split-error ()
+  "A failed tree rebuild restores all existing windows and their contents."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((buffers (cl-loop repeat 3 collect (generate-new-buffer " *dash rollback*"))))
+     (unwind-protect
+         (progn
+           (mapc #'agent-dash-pop-to-buffer buffers)
+           (let ((state (window-state-get))
+                 (selected (selected-window)))
+             (cl-letf (((symbol-function 'split-window)
+                        (lambda (&rest _) (error "Split failed"))))
+               (should-error (agent-dash--layout-rebuild (agent-dash--layout-windows) 2)))
+             (should (equal state (window-state-get)))
+             (should (eq selected (selected-window)))))
+       (mapc #'kill-buffer buffers)))))
 
 (provide 'agent-dash-tab-test)
 ;;; agent-dash-tab-test.el ends here
