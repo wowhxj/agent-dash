@@ -47,7 +47,10 @@
      (make-directory agent-dash-hub-test-beta t)
      (save-window-excursion
        (unwind-protect
-           (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 200)))
+           (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 200))
+                     ((symbol-function 'agent-dash-history-request) #'agent-dash-fake-history-request)
+                     ((symbol-function 'agent-dash-hub--schedule-redisplay)
+                      #'agent-dash-hub--redisplay))
              (agent-dash-hub)
              (agent-dash-test-wait
               (lambda () (not (seq-some (lambda (b) (eq (plist-get (gethash b agent-dash-hub--sources)
@@ -104,6 +107,8 @@
 (ert-deftest agent-dash-hub-test-filters-and-ordering ()
   (agent-dash-hub-test-with-hub
    (agent-dash-hub-toggle-live)
+   (agent-dash-test-wait
+    (lambda () (eq (plist-get (gethash 'broken agent-dash-hub--sources) :status) 'error)))
    (should (equal (agent-dash-hub-test-ids) '("s2-bbbbbbbb")))
    (agent-dash-hub-toggle-live)
    (setq agent-dash-hub--project "ad-alpha")
@@ -121,6 +126,58 @@
    (should (equal (agent-dash-hub-test-ids) '("s1-aaaaaaaa")))
    (should (string-search (format "+ %s (1)" (abbreviate-file-name agent-dash-hub-test-beta))
                           (buffer-string)))))
+
+(ert-deftest agent-dash-hub-test-live-toggle-refreshes-session-snapshot ()
+  "Enabling live filtering discovers new instances and drops stopped ones."
+  (agent-dash-hub-test-with-hub
+   (let ((first (copy-sequence (car agent-dash-fake-saved)))
+         (stopped (copy-sequence (cadr agent-dash-fake-saved))))
+     (setq agent-dash-fake-saved
+           (list (plist-put first :running t)
+                 (plist-put stopped :running nil)
+                 (list :id "new-live" :root agent-dash-hub-test-beta
+                       :time (float-time) :first "new instance" :running t))))
+   ;; The inventory still contains the original running s2 snapshot.
+   (should (agent-dash-hub-live-p
+            (seq-find (lambda (row) (equal (plist-get row :id) "s2-bbbbbbbb"))
+                      (agent-dash-hub--all))))
+   (call-interactively (key-binding "l"))
+   (should agent-dash-hub--live-only)
+   (agent-dash-test-wait
+    (lambda ()
+      (and (eq (plist-get (gethash 'broken agent-dash-hub--sources) :status) 'error)
+           (equal (agent-dash-hub-test-ids) '("new-live" "s1-aaaaaaaa")))))
+   (let ((generation agent-dash-hub--generation))
+     (call-interactively (key-binding "l"))
+     (should-not agent-dash-hub--live-only)
+     (should (= generation agent-dash-hub--generation))
+     (should (equal (agent-dash-hub-test-ids)
+                    '("new-live" "s2-bbbbbbbb" "s1-aaaaaaaa"))))))
+
+(ert-deftest agent-dash-hub-test-live-refresh-keeps-view-state ()
+  "Refreshing live status preserves filters, folds and deletion marks."
+  (agent-dash-hub-test-with-hub
+   (setq agent-dash-hub--agent 'fake
+         agent-dash-hub--project "ad-beta"
+         agent-dash-hub--grouping 'agent)
+   (puthash "folded-project" t agent-dash-hub--collapsed)
+   (puthash "fake:s1-aaaaaaaa" t agent-dash-hub--marks)
+   (let ((generation agent-dash-hub--generation))
+     (call-interactively (key-binding "l"))
+     (should (> agent-dash-hub--generation generation))
+     (agent-dash-test-wait
+      (lambda () (not (seq-some
+                       (lambda (backend)
+                         (eq (plist-get (gethash backend agent-dash-hub--sources) :status)
+                             'loading))
+                       agent-dash-backends)))))
+   (should (eq agent-dash-hub--agent 'fake))
+   (should (equal agent-dash-hub--project "ad-beta"))
+   (should (eq agent-dash-hub--grouping 'agent))
+   (should (gethash "folded-project" agent-dash-hub--collapsed))
+   (should (gethash "fake:s1-aaaaaaaa" agent-dash-hub--marks))
+   (should (equal (agent-dash-hub-test-ids) '("s2-bbbbbbbb")))
+   (should (string-match-p "来源失败：broken" agent-dash-hub--status))))
 
 (ert-deftest agent-dash-hub-test-open-resumes-then-switches ()
   (agent-dash-hub-test-with-hub

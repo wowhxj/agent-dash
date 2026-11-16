@@ -69,7 +69,7 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
 ;; scheduler see the same rows as the table.
 (defvar agent-dash-hub--sources (make-hash-table)
   "Backend -> plist (:status loading|ok|error :rows ROWS :error STRING).")
-(defvar agent-dash-hub--generation 0 "Refresh generation; late scans are dropped.")
+(defvar agent-dash-hub--generation 0 "Number of requested hub refreshes.")
 
 (defvar-local agent-dash-hub--agent nil "Backend filter, or nil for all.")
 (defvar-local agent-dash-hub--project nil "Project substring filter, or nil.")
@@ -125,21 +125,29 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
       (setq rows (append rows (plist-get (gethash backend agent-dash-hub--sources) :rows))))
     rows))
 
-(defun agent-dash-hub--load (backend)
-  "List BACKEND's sessions into the shared inventory."
-  (let ((old (gethash backend agent-dash-hub--sources))
-        (agent-dash-history-warnings nil))
-    (condition-case err
-        (let ((rows (mapcar (lambda (s) (agent-dash-hub--row backend s))
-                            (agent-dash-backend-sessions backend nil))))
-          (agent-dash-summary-register rows)
-          (puthash backend (list :status 'ok :rows rows
-                                 :warnings (nreverse agent-dash-history-warnings))
-                   agent-dash-hub--sources))
-      ;; A broken source keeps its previous rows, marked stale.
-      (error (puthash backend (list :status 'error :rows (plist-get old :rows)
-                                    :error (error-message-string err))
-                      agent-dash-hub--sources)))))
+(defun agent-dash-hub--history-updated (backend result)
+  "Publish BACKEND's shared reader RESULT, preserving old rows on failure."
+  (let ((old (gethash backend agent-dash-hub--sources)))
+    (puthash backend
+             (if (plist-get result :ok)
+                 (list :status 'ok
+                       :rows (mapcar (lambda (row) (agent-dash-hub--row backend row))
+                                     (plist-get result :value))
+                       :warnings (plist-get result :warnings)
+                       :seconds (plist-get result :seconds))
+               (list :status 'error :rows (plist-get old :rows)
+                     :error (plist-get result :error) :seconds (plist-get result :seconds)))
+             agent-dash-hub--sources))
+  (agent-dash-hub--schedule-redisplay))
+
+(add-hook 'agent-dash-history-update-hook #'agent-dash-hub--history-updated)
+
+(defun agent-dash-hub--load (backend &optional callback)
+  "Request BACKEND's inventory without blocking; optionally call CALLBACK."
+  (puthash backend (plist-put (copy-sequence (gethash backend agent-dash-hub--sources))
+                              :status 'loading)
+           agent-dash-hub--sources)
+  (agent-dash-history-request backend 'sessions callback))
 
 (defun agent-dash-hub--first-text (row)
   "Return ROW's first prompt, labelled title, or a placeholder."
@@ -394,25 +402,34 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
       (when (derived-mode-p 'agent-dash-hub-mode)
         (agent-dash-hub--render)))))
 
-(add-hook 'agent-dash-summary-update-hook #'agent-dash-hub--redisplay)
+(remove-hook 'agent-dash-summary-update-hook #'agent-dash-hub--redisplay)
+(add-hook 'agent-dash-summary-update-hook #'agent-dash-hub--schedule-redisplay)
 
-(defun agent-dash-hub-refresh ()
-  "Reread every backend's sessions, one source at a time."
+(defvar agent-dash-hub--render-timer nil
+  "Timer merging reader completions into a single hub redraw.")
+
+(defun agent-dash-hub--schedule-redisplay ()
+  "Merge bursts of worker and summary updates into one redraw."
+  (unless (timerp agent-dash-hub--render-timer)
+    (setq agent-dash-hub--render-timer
+          (run-at-time 0.05 nil
+                       (lambda ()
+                         (setq agent-dash-hub--render-timer nil)
+                         (agent-dash-hub--redisplay))))))
+
+(defun agent-dash-hub-refresh (&optional done)
+  "Reread sessions in isolated workers; call DONE after all sources finish.
+Keep old rows usable while loading.  Repeated requests share active workers."
   (interactive)
-  (let ((generation (cl-incf agent-dash-hub--generation)))
-    (dolist (backend agent-dash-backends)
-      (puthash backend (plist-put (copy-sequence (gethash backend agent-dash-hub--sources))
-                                  :status 'loading)
-               agent-dash-hub--sources))
-    (agent-dash-hub--redisplay)
-    ;; One backend per timer turn keeps Emacs responsive and the header
-    ;; showing which sources are still being read.
-    (cl-labels ((next (backends)
-                  (when (and backends (= generation agent-dash-hub--generation))
-                    (agent-dash-hub--load (car backends))
-                    (agent-dash-hub--redisplay)
-                    (run-at-time 0 nil #'next (cdr backends)))))
-      (run-at-time 0 nil #'next agent-dash-backends))))
+  (cl-incf agent-dash-hub--generation)
+  (let ((pending (length agent-dash-backends)))
+    (if (zerop pending)
+        (when done (funcall done))
+      (dolist (backend agent-dash-backends)
+        (agent-dash-hub--load
+         backend (when done (lambda (_result)
+                              (when (zerop (cl-decf pending)) (funcall done))))))))
+  (agent-dash-hub--redisplay))
 
 ;;;; Navigation and filters
 
@@ -479,10 +496,12 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
     (agent-dash-hub--render)))
 
 (defun agent-dash-hub-toggle-live ()
-  "Toggle showing only live sessions."
+  "Toggle showing only live sessions, refreshing the inventory when enabled."
   (interactive)
   (setq agent-dash-hub--live-only (not agent-dash-hub--live-only))
-  (agent-dash-hub--render))
+  (if agent-dash-hub--live-only
+      (agent-dash-hub-refresh)
+    (agent-dash-hub--render)))
 
 (defun agent-dash-hub-toggle-hidden ()
   "Toggle showing sessions that are never summarized."
@@ -678,8 +697,10 @@ Candidates keep the list order and show the table header as their group."
       (princ (format "显示 %d/已载入 %d；过滤/隐藏 %d。\n\n" visible total (- total visible)))
       (dolist (backend agent-dash-backends)
         (let ((source (gethash backend agent-dash-hub--sources)))
-          (princ (format "%-7s %s；%d 条%s\n" backend (or (plist-get source :status) "未载入")
+          (princ (format "%-7s %s；%d 条%s%s\n" backend (or (plist-get source :status) "未载入")
                          (length (plist-get source :rows))
+                         (if (numberp (plist-get source :seconds))
+                             (format "；后台读取 %.3fs" (plist-get source :seconds)) "")
                          (if (plist-get source :error)
                              (concat "\n  " (plist-get source :error))
                            "")))
@@ -1097,6 +1118,13 @@ otherwise identical labels distinct; all visible metadata is searchable."
     (unless (memq (plist-get (gethash source agent-dash-hub--sources) :status)
                   '(ok error))
       (agent-dash-hub--load source)))
+  (when (and (not (seq-some (lambda (row)
+                              (or (not backend) (eq backend (plist-get row :backend))))
+                            (agent-dash-hub--all)))
+             (seq-some (lambda (source)
+                         (eq (plist-get (gethash source agent-dash-hub--sources) :status) 'loading))
+                       (if backend (list backend) agent-dash-backends)))
+    (user-error "会话列表正在后台读取，请稍后重试引用"))
   (let* ((rows (agent-dash-hub--newest-first
                 (seq-filter (lambda (row)
                               (or (not backend) (eq backend (plist-get row :backend))))

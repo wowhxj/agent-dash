@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'agent-dash-core)
+(require 'agent-dash-history)
 
 (declare-function gptel-request "ext:gptel-request")
 (declare-function gptel-abort "ext:gptel-request")
@@ -343,16 +344,26 @@ Call ON-RESPONSE with the reply."
           (next 0))))))
 
 (defun agent-dash-summary--start (row)
-  "Read ROW's dialogue and request a summary unless it is unchanged."
-  (let* ((job (list :key (agent-dash-summary-key row) :row row
-                    :stamp (agent-dash-summary--stamp row)
-                    :timer nil :buffer nil :model nil))
-         (text (progn (setq agent-dash-summary--job job)
-                      (agent-dash-summary--notify)
-                      (condition-case err (agent-dash-summary-dialogue row)
-                        (error (agent-dash-summary--failed
-                                job (format "cannot read session: %s" (error-message-string err)))
-                               nil)))))
+  "Read ROW's dialogue in an isolated process before requesting a summary."
+  (let ((job (list :key (agent-dash-summary-key row) :row row
+                   :stamp (agent-dash-summary--stamp row)
+                   :timer nil :buffer nil :model nil :reader nil)))
+    (setq agent-dash-summary--job job)
+    (agent-dash-summary--notify)
+    (setf (plist-get job :reader)
+          (agent-dash-history-request
+           (plist-get row :backend) 'dialogue
+           (lambda (result)
+             (when (eq job agent-dash-summary--job)
+               (if (plist-get result :ok)
+                   (agent-dash-summary--summarize job (plist-get result :value))
+                 (agent-dash-summary--failed
+                  job (format "cannot read session: %s" (plist-get result :error))))))
+           (plist-get row :id)))))
+
+(defun agent-dash-summary--summarize (job text)
+  "Summarize the asynchronously read TEXT belonging to JOB."
+  (let ((row (plist-get job :row)))
     (when (and text (eq job agent-dash-summary--job))
       (let ((fingerprint (secure-hash 'sha256 text))
             (entry (agent-dash-summary-entry row)))
@@ -406,15 +417,22 @@ Call ON-RESPONSE with the reply."
      agent-dash-summary--sessions)
     best))
 
+(defun agent-dash-summary--history-updated (backend result)
+  "Register BACKEND's shared history RESULT without scanning in the GUI."
+  (if (plist-get result :ok)
+      (agent-dash-summary-register
+       (mapcar (lambda (row) (cons :backend (cons backend row)))
+               (plist-get result :value)))
+    (setq agent-dash-summary--diagnostic (format "%s: %s" backend (plist-get result :error)))))
+
+(add-hook 'agent-dash-history-update-hook #'agent-dash-summary--history-updated)
+
 (defun agent-dash-summary--scan ()
-  "Reread every backend's session list into the registry."
+  "Request missing or old listings without blocking or duplicating hub scans."
   (dolist (backend agent-dash-backends)
-    (condition-case err
-        (agent-dash-summary-register
-         (mapcar (lambda (s) (cons :backend (cons backend s)))
-                 (agent-dash-backend-sessions backend nil)))
-      (error (setq agent-dash-summary--diagnostic
-                   (format "%s: %s" backend (error-message-string err)))))))
+    (when (>= (- (float-time) (gethash backend agent-dash-history--completed 0))
+              agent-dash-summary-scan-interval)
+      (agent-dash-history-request backend 'sessions))))
 
 (defun agent-dash-summary--tick ()
   "Run one scheduler pass and schedule the next."
@@ -426,6 +444,10 @@ Call ON-RESPONSE with the reply."
             (setq agent-dash-summary--next-scan (+ (float-time) agent-dash-summary-scan-interval))
             (agent-dash-summary--scan))
           (when (and (not agent-dash-summary--job) (not agent-dash-summary--paused)
+                     (not (seq-some
+                           (lambda (backend)
+                             (gethash (list backend 'sessions nil) agent-dash-history--jobs))
+                           agent-dash-backends))
                      (>= (- (float-time) agent-dash-summary--last-request)
                          agent-dash-summary-request-interval))
             (when-let* ((row (agent-dash-summary--candidate)))

@@ -94,5 +94,25 @@
 (cl-defmethod agent-dash-backend-delete ((_ (eql fake)) session)
   (push (list 'delete (plist-get session :id)) agent-dash-fake-calls))
 
+(defun agent-dash-fake-history-request (backend operation &optional callback id)
+  "Complete a mocked reader immediately for deterministic unit tests.
+Real process isolation is covered by the history async integration tests."
+  (let* ((agent-dash-history-warnings nil)
+         (result
+          (condition-case err
+              (list :ok t :value
+                    (pcase operation
+                      ('sessions (agent-dash-backend-sessions backend nil))
+                      ('dialogue
+                       (mapconcat (lambda (turn)
+                                    (format "%s: %s" (if (eq (car turn) 'user) "User" "Assistant")
+                                            (cdr turn)))
+                                  (agent-dash-backend-transcript backend id) "\n\n")))
+                    :warnings (nreverse agent-dash-history-warnings))
+            (error (list :ok nil :error (error-message-string err))))))
+    (when (eq operation 'sessions)
+      (run-hook-with-args 'agent-dash-history-update-hook backend result))
+    (when callback (funcall callback result))))
+
 (provide 'agent-dash-fake)
 ;;; agent-dash-fake.el ends here

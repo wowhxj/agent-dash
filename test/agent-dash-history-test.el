@@ -6,6 +6,7 @@
 ;;; Code:
 (require 'ert)
 (require 'agent-dash)
+(require 'agent-dash-fake)
 
 (defun agent-dash-history-test--pi-file (base path id root &optional parent-session)
   "Write a minimal session ID under BASE/PATH with metadata ROOT and PARENT-SESSION."
@@ -211,7 +212,8 @@
                (lambda (&rest _)
                  (push "bad file" agent-dash-history-warnings)
                  '((:id "healthy" :root "/tmp" :time 1))))
-              ((symbol-function 'agent-dash-summary-register) #'ignore))
+              ((symbol-function 'agent-dash-summary-register) #'ignore)
+              ((symbol-function 'agent-dash-history-request) #'agent-dash-fake-history-request))
       (agent-dash-hub--load 'fake)
       (let ((source (gethash 'fake agent-dash-hub--sources)))
         (should (eq (plist-get source :status) 'ok))

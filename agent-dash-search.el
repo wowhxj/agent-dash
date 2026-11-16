@@ -230,14 +230,27 @@
     (nreverse chunks)))
 
 (defun agent-dash-search--collect (run)
-  "Prepare RUN's items one session per timer turn, then extract."
-  (unless (agent-dash-hub--all)
-    (dolist (backend agent-dash-backends) (agent-dash-hub--load backend)))
+  "Prepare RUN after the shared inventory is ready, without blocking."
+  (if (agent-dash-hub--all)
+      (agent-dash-search--collect-ready run)
+    (agent-dash-hub-refresh
+     (lambda ()
+       (when (agent-dash-search--live-p run)
+         (agent-dash-search--collect-ready run))))))
+
+(defun agent-dash-search--collect-ready (run)
+  "Collect RUN's text from the ready inventory using isolated readers."
   (let* ((rows (seq-remove #'agent-dash-summary-skip-reason (agent-dash-hub--all)))
          (n 0) items)
     (setf (agent-dash-search--run-total run) (length rows))
     (cl-labels
-        ((next (queue)
+        ((advance (queue)
+           (when (zerop (% n 20))
+             (setf (agent-dash-search--run-status run)
+                   (format "搜索中：读取会话 %d/%d" n (agent-dash-search--run-total run)))
+             (agent-dash-search--render run))
+           (run-at-time 0 nil #'next queue))
+         (next (queue)
            (when (agent-dash-search--live-p run)
              (if (null queue)
                  (progn (setf (agent-dash-search--run-items run) (nreverse items))
@@ -246,24 +259,26 @@
                (let* ((row (car queue)) (id (cl-incf n)))
                  (puthash id row (agent-dash-search--run-sources run))
                  (if (eq (agent-dash-search--run-mode run) 'summary)
-                     (if-let* ((summary (agent-dash-summary-text row)))
-                         (push (list :source id :text summary
-                                     :agent (symbol-name (plist-get row :backend))
-                                     :project (or (plist-get row :root) ""))
-                               items)
-                       (cl-incf (agent-dash-search--run-missing run)))
-                   (condition-case err
-                       (dolist (chunk (agent-dash-search--chunks
-                                       id (agent-dash-summary-dialogue row)))
-                         (push chunk items))
-                     (error (cl-incf (agent-dash-search--run-missing run))
-                            (push (format "%s：%s" (plist-get row :key) (error-message-string err))
-                                  (agent-dash-search--run-errors run)))))
-                 (when (zerop (% n 20))
-                   (setf (agent-dash-search--run-status run)
-                         (format "搜索中：读取会话 %d/%d" n (agent-dash-search--run-total run)))
-                   (agent-dash-search--render run))
-                 (run-at-time 0 nil #'next (cdr queue)))))))
+                     (progn
+                       (if-let* ((summary (agent-dash-summary-text row)))
+                           (push (list :source id :text summary
+                                       :agent (symbol-name (plist-get row :backend))
+                                       :project (or (plist-get row :root) "")) items)
+                         (cl-incf (agent-dash-search--run-missing run)))
+                       (advance (cdr queue)))
+                   (agent-dash-history-request
+                    (plist-get row :backend) 'dialogue
+                    (lambda (result)
+                      (when (agent-dash-search--live-p run)
+                        (if (plist-get result :ok)
+                            (dolist (chunk (agent-dash-search--chunks
+                                            id (plist-get result :value)))
+                              (push chunk items))
+                          (cl-incf (agent-dash-search--run-missing run))
+                          (push (format "%s：%s" (plist-get row :key) (plist-get result :error))
+                                (agent-dash-search--run-errors run)))
+                        (advance (cdr queue))))
+                    (plist-get row :id))))))))
       (next rows))))
 
 ;;;; Results buffer
