@@ -111,7 +111,8 @@
       (setq-local agent-dash--session session)
       (let ((header (agent-dash--header)))
         (should (string-search "new-model" header))
-        (dolist (text '("tok/s" "cache" "turns" "standard" "tok"))
+        (should (string-search "0 turns · 0 steps" header))
+        (dolist (text '("tok/s" "cache" "standard" "tok"))
           (should-not (string-search text header)))))))
 
 (ert-deftest agent-dash-dsh-metrics-null-preset-and-header-fallback ()
@@ -126,10 +127,51 @@
       (should (equal (plist-get (agent-dash-session-meta session) :agent-preset)
                      (and (equal values "{}") "standard"))))))
 
+(ert-deftest agent-dash-dsh-metrics-new-session-uses-host-default ()
+  "Null next selection uses the catalog default without changing Host state."
+  (let ((session (agent-dash-dsh-metrics-test-session)))
+    (cl-letf (((symbol-function 'agent-dash-dsh--call)
+               (lambda (endpoint params &rest _)
+                 (should (equal endpoint "session/modelCatalog"))
+                 (should (zerop (hash-table-count params)))
+                 (agent-dash-json-read
+                  (concat "{\"default\":{\"provider\":\"default-provider\","
+                          "\"model\":\"default-model\",\"reasoningEffort\":\"medium\"}}")))))
+      (agent-dash-dsh--load-default-model session))
+    (agent-dash-dsh--apply-projections
+     session (agent-dash-json-read "{\"modelSelection\":{\"next\":null}}") 1)
+    (with-temp-buffer
+      (setq-local agent-dash--session session)
+      (should (string-search "(default-provider) default-model" (agent-dash--header)))
+      (should-not (string-search "model pending" (agent-dash--header))))
+    (agent-dash-dsh--apply-projections
+     session (agent-dash-json-read
+              (concat "{\"sessionStats\":{\"turns\":0,\"steps\":0},"
+                      "\"tokenUsage\":{\"uncachedInputTokens\":0,\"cacheReadTokens\":0,"
+                      "\"cacheWriteTokens\":0,\"outputTokens\":0}}")) 1)
+    (should (equal (agent-dash--stat-segments session)
+                   '("0 turns · 0 steps" "0 tok")))
+    (agent-dash-dsh--apply-projections
+     session (agent-dash-json-read agent-dash-dsh-metrics-test-values) 2)
+    (should (equal (plist-get (agent-dash-session-meta session) :model) "gpt-6.1-sol"))
+    (agent-dash-dsh--apply-projections
+     session (agent-dash-json-read "{\"modelSelection\":{\"next\":null}}") 3)
+    (should (equal (plist-get (agent-dash-session-meta session) :model) "default-model"))
+    (cl-letf (((symbol-function 'agent-dash-dsh--call)
+               (lambda (&rest _) (error "Catalog unavailable"))))
+      (agent-dash-dsh--load-default-model session))
+    (should-not (agent-dash-data session :default-model-selection))
+    (should-not (plist-get (agent-dash-session-meta session) :model))
+    (should (agent-dash-item session "dsh-default-model-error"))))
+
 (ert-deftest agent-dash-dsh-metrics-follow-subscribes-control ()
   "Subscribe both streams and route control frames without another connection."
   (let ((session (agent-dash-dsh-metrics-test-session)) sent handler)
-    (cl-letf (((symbol-function 'agent-dash-dsh--socket)
+    (cl-letf (((symbol-function 'agent-dash-dsh--call)
+               (lambda (endpoint _params &rest _)
+                 (should (equal endpoint "session/modelCatalog"))
+                 (agent-dash-json-read "{}")))
+              ((symbol-function 'agent-dash-dsh--socket)
                (lambda (on-open on-item)
                  (setq handler on-item)
                  (funcall on-open 'socket)

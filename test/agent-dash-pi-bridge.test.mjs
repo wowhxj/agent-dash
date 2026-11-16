@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,6 +130,7 @@ test('bridge is not a plaintext auth dialog in TUI mode', async () => {
 test('control channel never interprets ordinary prompts or ordinary UI responses', async () => {
   const events = new Map(), pi = { on: (name, fn) => events.set(name, fn) };
   const input = new EventEmitter(), seen = [];
+  input.on('data', () => {}); // The SDK's RPC reader owns stdin first.
   const dispose = bindControlChannel(pi, value => seen.push(value), input);
   events.get('session_start')({}, { mode: 'rpc' });
   input.emit('data', JSON.stringify({ type: 'prompt', message: 'agent-dash-native:anything' }) + '\n');
@@ -138,11 +140,30 @@ test('control channel never interprets ordinary prompts or ordinary UI responses
   input.emit('data', line.slice(0, 15)); input.emit('data', line.slice(15));
   assert.deepEqual(seen, [value]);
   events.get('session_start')({}, { mode: 'rpc' });
-  assert.equal(input.listenerCount('data'), 1);
-  events.get('session_shutdown')(); assert.equal(input.listenerCount('data'), 0);
+  assert.equal(input.listenerCount('data'), 2);
+  events.get('session_shutdown')(); assert.equal(input.listenerCount('data'), 1);
   events.get('session_start')({}, { mode: 'interactive' });
-  assert.equal(input.listenerCount('data'), 0); dispose();
+  assert.equal(input.listenerCount('data'), 1); dispose();
 });
+test('control bridge cannot consume buffered startup queries before RPC is ready', async () => {
+  const events = new Map(), pi = { on: (name, fn) => events.set(name, fn) };
+  const input = new PassThrough(), seen = [], rpc = [];
+  const dispose = bindControlChannel(pi, value => seen.push(value), input);
+  input.write('{"id":"ad-1","type":"get_state"}\n{"id":"ad-2","type":"get_entries"}\n');
+  events.get('session_start')({}, { mode: 'rpc' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(input.listenerCount('data'), 0);
+  input.on('data', chunk => rpc.push(chunk.toString()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rpc.join(''), '{"id":"ad-1","type":"get_state"}\n{"id":"ad-2","type":"get_entries"}\n');
+  const value = encode('session');
+  input.write(JSON.stringify({ type: 'extension_ui_response', id: 'agent-dash-native:op', value }) + '\n');
+  assert.deepEqual(seen, [value]);
+  dispose();
+  assert.equal(input.listenerCount('newListener'), 0);
+  input.destroy();
+});
+
 test('native catalog supports ordinary and bundled CLI layouts via symlinks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dash-native-'));
   try {

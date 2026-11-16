@@ -208,7 +208,8 @@ once; RETRIED marks that second attempt."
 (defun agent-dash-dsh--publish-metrics (session values)
   "Normalize cached DSH projection VALUES into SESSION's shared UI metadata."
   (let* ((pressure (gethash "contextPressure" values))
-         (selection (agent-dash-jget (gethash "modelSelection" values) "next"))
+         (selection (or (agent-dash-jget (gethash "modelSelection" values) "next")
+                        (agent-dash-data session :default-model-selection)))
          (usage (gethash "tokenUsage" values))
          (raw (gethash "sessionStats" values))
          (tokens (make-hash-table :test #'equal))
@@ -518,8 +519,23 @@ This runs on protocol input, never during display-only redraw."
 
 ;;;; Backend methods
 
+(defun agent-dash-dsh--load-default-model (session)
+  "Read SESSION's Host default model without selecting it or invoking inference."
+  (condition-case err
+      (agent-dash-set-data
+       session :default-model-selection
+       (agent-dash-jget (agent-dash-dsh--call "session/modelCatalog"
+                                              (make-hash-table :test #'equal)) "default"))
+    (error
+     (agent-dash-set-data session :default-model-selection nil)
+     (agent-dash-emit session (list :type 'notice :id "dsh-default-model-error"
+                                    :level 'warning :text (error-message-string err)))))
+  (agent-dash-dsh--publish-metrics
+   session (or (agent-dash-data session :projections) (make-hash-table :test #'equal))))
+
 (defun agent-dash-dsh--follow (session)
   "Follow SESSION's events on a new websocket."
+  (agent-dash-dsh--load-default-model session)
   (let ((sid (agent-dash-data session :sid)))
     (agent-dash-set-data
      session :socket

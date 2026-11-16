@@ -215,6 +215,33 @@
                 (plist-get (agent-dash-session-meta session) :stats) "cost")
                0))))
 
+(ert-deftest agent-dash-ui-test-pi-stats-initialize-and-refresh-during-run ()
+  "Initialize statistics without waiting for history and refresh between steps."
+  (let ((session (agent-dash-session-create 'pi "/tmp")) (calls 0))
+    (agent-dash-set-data session :writer 'fake)
+    (cl-letf (((symbol-function 'process-live-p) #'always)
+              ((symbol-function 'agent-dash-pi--request)
+               (lambda (_s command callback)
+                 (should (equal (plist-get command :type) "get_session_stats"))
+                 (cl-incf calls)
+                 (funcall callback t
+                          (agent-dash-json-read
+                           (format (concat "{\"tokens\":{\"total\":%d},\"cost\":0,"
+                                           "\"userMessages\":0,\"assistantMessages\":0,"
+                                           "\"contextUsage\":{\"tokens\":%d,"
+                                           "\"contextWindow\":100}}") calls calls)) nil))))
+      (agent-dash-pi--on-state
+       session t (agent-dash-json-read "{\"model\":{\"id\":\"m\"},\"isStreaming\":true}") nil)
+      (should (= calls 1))
+      (should-not (agent-dash-data session :history-loaded))
+      (should (member "0 prompts · 0 calls" (agent-dash--stat-segments session)))
+      (dolist (event '("turn_start" "turn_end" "compaction_end"))
+        (agent-dash-pi--record session (agent-dash-json-read
+                                        (format "{\"type\":\"%s\"}" event))))
+      (should (= calls 4))
+      (should (eq (agent-dash-session-state session) 'running))
+      (should (equal (car (agent-dash--stat-segments session)) "4/100")))))
+
 (ert-deftest agent-dash-ui-test-header-alignment-and-narrow-widths ()
   "Use a right-edge display anchor and retain model identity when narrow."
   (agent-dash-ui-test-with-chat

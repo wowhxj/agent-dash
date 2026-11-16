@@ -195,10 +195,24 @@ export default async function extension(pi) {
 
 export function bindControlChannel(pi, handle, input = process.stdin) {
   let context;
+  // session_start precedes the SDK's RPC reader. Becoming stdin's first data
+  // listener would drain buffered get_state/get_entries before the SDK sees them.
+  const readerAdded = event => {
+    if (event !== 'data') return;
+    input.off('newListener', readerAdded);
+    queueMicrotask(() => {
+      if (context && input.listenerCount('data') > 0
+          && !input.listeners('data').includes(listen)) input.on('data', listen);
+    });
+  };
   pi.on('session_start', (_event, ctx) => {
     context = ctx.mode === 'rpc' ? ctx : undefined;
     input.off('data', listen);
-    if (context) input.on('data', listen);
+    input.off('newListener', readerAdded);
+    if (context) {
+      if (input.listenerCount('data') > 0) input.on('data', listen);
+      else input.on('newListener', readerAdded);
+    }
   });
   // Unsolicited extension_ui_response is ignored by stock RPC, not treated as
   // a model prompt. Even a missing/unloaded bridge cannot leak a slash command
@@ -225,7 +239,12 @@ export function bindControlChannel(pi, handle, input = process.stdin) {
     }
     if (pending.length > 65536) { pending = ''; dropping = true; }
   };
-  const dispose = () => { input.off('data', listen); pending = ''; context = undefined; };
+  const dispose = () => {
+    input.off('newListener', readerAdded);
+    input.off('data', listen);
+    pending = '';
+    context = undefined;
+  };
   pi.on('session_shutdown', dispose);
   return dispose;
 }

@@ -397,7 +397,7 @@ visibility choices survive intermediate updates, but not the finish transition."
                                 (if (>= percent 95) 'error 'warning))))
     (delq nil
           (list context
-                (when (and (numberp turns) (numberp steps) (> steps 0))
+                (when (and (numberp turns) (numberp steps))
                   (format "%d turns · %d steps" turns steps))
                 (when (and (numberp decode-ms) (> decode-ms 0)
                            (numberp decode-tokens))

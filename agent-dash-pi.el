@@ -230,6 +230,8 @@
        (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
      (agent-dash-emit session '(:type run :state idle))
      (agent-dash-pi--refresh-stats session))
+    ((or "turn_start" "turn_end" "compaction_end")
+     (agent-dash-pi--refresh-stats session))
     ("message_start"
      (when (equal (agent-dash-jget record "message" "role") "assistant")
        (agent-dash-set-data session :blocks nil)
@@ -287,7 +289,7 @@
      (agent-dash-emit session (list :type 'notice :level 'warning
                                     :text (format "Pi exited (code %s); C-c C-r resumes"
                                                   (agent-dash-jget record "code")))))
-    ;; turn_*, compaction_end, auto_retry_end, summarization_*:
+    ;; Other turn/compaction events, auto_retry_end, summarization_*:
     ;; their content arrives through other records.
     (_ nil)))
 
@@ -318,7 +320,8 @@
                                    :thinking (agent-dash-jget data "thinkingLevel")
                                    :title (agent-dash-jget data "sessionName")))
     (when (agent-dash-jget data "isStreaming")
-      (agent-dash-emit session '(:type run :state running)))))
+      (agent-dash-emit session '(:type run :state running)))
+    (agent-dash-pi--refresh-stats session)))
 
 (defun agent-dash-pi--branch-messages (entries leaf-id)
   "Return chronological messages on LEAF-ID's branch of ENTRIES.
