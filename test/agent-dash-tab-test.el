@@ -422,5 +422,95 @@
              (should (eq selected (selected-window)))))
        (mapc #'kill-buffer buffers)))))
 
+(ert-deftest agent-dash-tab-test-hub-resizes-without-rereading ()
+  "Hub columns follow real split widths, without rescanning or stealing focus."
+  (agent-dash-tab-test-with-wide-frame
+   (let ((hub (generate-new-buffer " *dash responsive hub*"))
+         (chat (generate-new-buffer " *dash responsive chat*"))
+         (agent-dash-backends '(fake))
+         (agent-dash-hub--sources (make-hash-table))
+         (agent-dash-hub--render-timer nil)
+         (agent-dash-summary--loaded t)
+         (agent-dash-summary--cache (make-hash-table :test #'equal))
+         (render (symbol-function 'agent-dash-hub--render))
+         (redraws 0))
+     (unwind-protect
+         (cl-labels ((notify (window)
+                       ;; Redisplay is absent in batch mode: run only local hooks.
+                       (with-current-buffer (window-buffer window)
+                         (dolist (function window-size-change-functions)
+                           (unless (eq function t) (funcall function window))))))
+           (puthash 'fake
+                    (list :status 'ok
+                          :rows (list (list :backend 'fake :id "first-id" :key "fake:first-id"
+                                            :root temporary-file-directory :time 1
+                                            :first (make-string 200 ?a) :last "last prompt")))
+                    agent-dash-hub--sources)
+           (agent-dash-pop-to-buffer hub)
+           (agent-dash-hub-mode)
+           (agent-dash-hub--render)
+           (should (memq #'agent-dash-hub--resize window-size-change-functions))
+           (setq agent-dash-hub--agent 'fake)
+           (puthash "folded" t agent-dash-hub--collapsed)
+           (puthash "fake:first-id" t agent-dash-hub--marks)
+           (cl-letf (((symbol-function 'agent-dash-history-request)
+                      (lambda (&rest _) (ert-fail "Resize reread history")))
+                     ((symbol-function 'agent-dash-hub-refresh)
+                      (lambda (&rest _) (ert-fail "Resize refreshed inventory")))
+                     ((symbol-function 'agent-dash-hub--render)
+                      (lambda () (cl-incf redraws) (funcall render))))
+             (agent-dash-pop-to-buffer chat)
+             (let ((window (get-buffer-window hub))
+                   (selected (selected-window)))
+               (notify window)
+               (let ((timer agent-dash-hub--render-timer))
+                 (should (timerp timer))
+                 (notify window)
+                 (should (eq timer agent-dash-hub--render-timer)))
+               (agent-dash-test-wait (lambda () (null agent-dash-hub--render-timer)))
+               (should (= redraws 1))
+               (should (eq (selected-window) selected))
+               (with-current-buffer hub
+                 (should (= agent-dash-hub--width (window-body-width window)))
+                 (should-not (string-match-p "^ +Agent.*项目" (buffer-string)))
+                 (should (eq agent-dash-hub--agent 'fake))
+                 (should (gethash "folded" agent-dash-hub--collapsed))
+                 (should (gethash "fake:first-id" agent-dash-hub--marks))
+                 (should (equal (get-text-property (point) 'agent-dash-key) "fake:first-id")))
+               ;; Height-only changes need no column redraw.
+               (let ((below (split-window window nil 'below)))
+                 (notify window)
+                 (notify below)
+                 (should-not agent-dash-hub--render-timer)
+                 (delete-window below))
+               ;; Manual horizontal resize must update the hub too.
+               (window-resize window 10 t)
+               (notify window)
+               (agent-dash-test-wait (lambda () (null agent-dash-hub--render-timer)))
+               (should (= redraws 2))
+               (delete-window selected)
+               (notify window)
+               (agent-dash-test-wait (lambda () (null agent-dash-hub--render-timer)))
+               (should (= redraws 3))
+               (with-current-buffer hub
+                 (should (= agent-dash-hub--width (window-body-width window)))
+                 (should (string-match-p "^ +Agent.*项目" (buffer-string))))
+               ;; One shared buffer cannot have two different column layouts.
+               (let ((other (split-window window 50 'right)))
+                 (notify window)
+                 (notify other)
+                 (agent-dash-test-wait (lambda () (null agent-dash-hub--render-timer)))
+                 (should (= redraws 4))
+                 (with-current-buffer hub
+                   (should (= agent-dash-hub--width
+                              (min (window-body-width window) (window-body-width other)))))
+                 (notify window)
+                 (notify other)
+                 (should-not agent-dash-hub--render-timer)))))
+       (when (timerp agent-dash-hub--render-timer)
+         (cancel-timer agent-dash-hub--render-timer))
+       (kill-buffer hub)
+       (kill-buffer chat)))))
+
 (provide 'agent-dash-tab-test)
 ;;; agent-dash-tab-test.el ends here

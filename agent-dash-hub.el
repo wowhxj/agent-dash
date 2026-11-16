@@ -79,6 +79,7 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
 (defvar-local agent-dash-hub--collapsed nil "Group name -> t when folded.")
 (defvar-local agent-dash-hub--marks nil "Row key -> t when marked for deletion.")
 (defvar-local agent-dash-hub--status "" "Header-line text.")
+(defvar-local agent-dash-hub--width nil "Body width used for the last table render.")
 
 ;;;; Rows
 
@@ -236,9 +237,16 @@ id with them is enough.  Return a hash table."
           (puthash id (substring id 0 (min (length id) 10 (max 8 need))) table))))
     table))
 
+(defun agent-dash-hub--window-width ()
+  "Return the narrowest visible hub window's body width.
+A shared buffer needs one column layout even when shown in several windows."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (if windows (apply #'min (mapcar #'window-body-width windows))
+      (window-body-width))))
+
 (defun agent-dash-hub--layout (rows)
-  "Compute column widths for ROWS in the current window."
-  (let* ((width (window-body-width (get-buffer-window (current-buffer))))
+  "Compute column widths for ROWS in the visible hub windows."
+  (let* ((width (agent-dash-hub--window-width))
          (short (agent-dash-hub--short-ids rows))
          (id (apply #'max 8 (mapcar #'string-width (hash-table-values short))))
          (project (if (>= width 120)
@@ -254,7 +262,7 @@ id with them is enough.  Return a hash table."
                                              rows))))
          (text (- message status 8 6))
          (summary (max 4 (min (- text 10) (floor (* text 0.6))))))
-    (list :id id :short short :project project
+    (list :width width :id id :short short :project project
           :summary summary :last (- text summary) :status status)))
 
 (defun agent-dash-hub--prefix (layout mark agent live date id project)
@@ -331,7 +339,8 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
       (let ((name (agent-dash-hub--group-name row)))
         (unless (gethash name groups) (push name order))
         (puthash name (cons row (gethash name groups)) groups)))
-    (setq agent-dash-hub--status (agent-dash-hub--status-line rows))
+    (setq agent-dash-hub--width (plist-get layout :width)
+          agent-dash-hub--status (agent-dash-hub--status-line rows))
     (erase-buffer)
     (insert (propertize "Agent Session Hub\n" 'face 'bold))
     (insert (format "分组:%s  agent:%s  项目:%s  摘要范围:%s  仅存活:%s\n\n"
@@ -406,10 +415,15 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
 (add-hook 'agent-dash-summary-update-hook #'agent-dash-hub--schedule-redisplay)
 
 (defvar agent-dash-hub--render-timer nil
-  "Timer merging reader completions into a single hub redraw.")
+  "Timer merging data and layout changes into a single hub redraw.")
+
+(defun agent-dash-hub--resize (_window)
+  "Schedule a cached redraw when the visible hub's effective width changes."
+  (unless (eql agent-dash-hub--width (agent-dash-hub--window-width))
+    (agent-dash-hub--schedule-redisplay)))
 
 (defun agent-dash-hub--schedule-redisplay ()
-  "Merge bursts of worker and summary updates into one redraw."
+  "Merge bursts of worker, summary and layout updates into one redraw."
   (unless (timerp agent-dash-hub--render-timer)
     (setq agent-dash-hub--render-timer
           (run-at-time 0.05 nil
@@ -1086,7 +1100,8 @@ w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
   (setq agent-dash-hub--collapsed (make-hash-table :test #'equal)
         agent-dash-hub--marks (make-hash-table :test #'equal)
         agent-dash-hub--grouping agent-dash-hub-group-by)
-  (add-hook 'post-command-hook #'agent-dash-hub--highlight nil t))
+  (add-hook 'post-command-hook #'agent-dash-hub--highlight nil t)
+  (add-hook 'window-size-change-functions #'agent-dash-hub--resize nil t))
 
 ;; Autoload the main file, which loads every backend, not just this one.
 ;;;###autoload (autoload 'agent-dash-hub "agent-dash" "List the saved sessions of every agent." t)
