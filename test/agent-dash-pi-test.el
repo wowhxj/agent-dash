@@ -47,6 +47,44 @@
     (should (eq (agent-dash-session-state s) 'idle))
     (should (equal (plist-get (agent-dash-session-meta s) :model) "m2"))))
 
+(ert-deftest agent-dash-pi-test-fast-status-in-model-header ()
+  "Only structured bridge status marks the model as fast."
+  (let ((session (agent-dash-session-create 'pi temporary-file-directory)))
+    (agent-dash-emit session '(:type meta :model "test-model" :provider "proxy"))
+    (with-temp-buffer
+      (setq-local agent-dash--session session)
+      (dolist (tier '("fast" "priority"))
+        (agent-dash-test-feed
+         session (format (concat "{\"type\":\"extension_ui_request\",\"method\":\"setStatus\","
+                                 "\"statusKey\":\"agent-dash-fast\",\"statusText\":\"%s\"}") tier))
+        (should (equal (plist-get (agent-dash-session-meta session) :service-tier) tier))
+        (agent-dash-test-feed
+         session (concat "{\"type\":\"extension_ui_request\",\"method\":\"setStatus\","
+                         "\"statusKey\":\"other\",\"statusText\":\"busy\"}"))
+        (dolist (width '(24 80 200))
+          (cl-letf (((symbol-function 'window-total-width) (lambda (&rest _) width)))
+            (let ((header (agent-dash--header)))
+              (should (string-search "⚡ test-model" header))
+              (should (string-search "Fast" (get-text-property 0 'help-echo header)))))))
+      (dolist (tier '(nil "default" "auto"))
+        (agent-dash-pi--ui-request
+         session (agent-dash-json-read
+                  (json-serialize (list :method "setStatus" :statusKey "agent-dash-fast"
+                                        :statusText tier))))
+        (should-not (string-search "⚡" (agent-dash--header)))))))
+
+(ert-deftest agent-dash-pi-test-fast-commands-clear-stale-status ()
+  "Both disambiguated fast commands retire the previous observed tier."
+  (let ((session (agent-dash-session-create 'pi temporary-file-directory)))
+    (dolist (name '("fast:1" "fast:2" "fast"))
+      (agent-dash-set-data session :command-catalog (list (cons name "Fast mode")))
+      (agent-dash-set-data session :pi-native-commands '(("session" . "Session")))
+      (agent-dash-emit session '(:type meta :service-tier "priority"))
+      (cl-letf (((symbol-function 'agent-dash-backend-send)
+                 (lambda (&rest _)
+                   (should-not (plist-get (agent-dash-session-meta session) :service-tier)))))
+        (agent-dash-backend-command 'pi session (concat "/" name) 'follow-up)))))
+
 (ert-deftest agent-dash-pi-test-tool-lifecycle ()
   (let ((s (agent-dash-session-create 'pi "/tmp")))
     (agent-dash-test-feed

@@ -202,6 +202,12 @@
             session (list :type 'notice
                           :level (intern (or (agent-dash-jget record "notifyType") "info"))
                           :text (ansi-color-filter-apply message))))))
+      ((and "setStatus" (guard (equal (agent-dash-jget record "statusKey")
+                                      "agent-dash-fast")))
+       (let ((tier (agent-dash-jget record "statusText")))
+         (agent-dash-emit session
+                          (list :type 'meta :service-tier
+                                (and (member tier '("fast" "priority")) tier)))))
       ("setStatus"
        (agent-dash-emit session
                         (list :type 'meta
@@ -474,6 +480,8 @@ Keep pre-compaction messages, but never replay abandoned branches."
                      (assoc name (or (agent-dash-data session :command-catalog)
                                      (agent-dash-backend-commands 'pi session))))
           (user-error "Unknown Pi command /%s; not sent to a model" name))
+        (when (string-match-p "\\`fast\\(?::[0-9]+\\)?\\'" name)
+          (agent-dash-emit session '(:type meta :service-tier nil)))
         (agent-dash-backend-send 'pi session text nil mode)))))
 
 (cl-defmethod agent-dash-backend-models ((_ (eql pi)) session)

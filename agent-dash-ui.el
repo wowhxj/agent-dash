@@ -418,7 +418,9 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (when-let* ((s agent-dash--session))
     (let* ((meta (agent-dash-session-meta s))
            (provider (plist-get meta :provider))
-           (model (or (plist-get meta :model) "model pending"))
+           (model (concat (when (member (plist-get meta :service-tier) '("fast" "priority"))
+                            "⚡ ")
+                          (or (plist-get meta :model) "model pending")))
            (thinking (plist-get meta :thinking))
            (short-model
             (agent-dash--one-line
@@ -434,6 +436,9 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                     short-model))
            (segments (agent-dash--stat-segments s))
            (help (concat (string-join segments " · ") "\n" right
+                         (when (member (plist-get meta :service-tier) '("fast" "priority"))
+                           (format "\nFast: %s (last observed provider request/response)."
+                                   (plist-get meta :service-tier)))
                          "\nContext: current usage / model window."
                          "\nTokens and cost: session totals; estimate, not a bill."
                          "\nCache: cache-read / (input + cache-read + cache-write)."))

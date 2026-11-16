@@ -191,6 +191,30 @@ export default async function extension(pi) {
   // Main's normal CLI bootstrap still owns resources, providers and trust.
   const handle = registerBridge(pi, await readBuiltinCommands(process.argv[1]));
   bindControlChannel(pi, handle);
+  bindFastStatus(pi);
+}
+
+// Observe structured provider data, never command names or translated notices.
+export function bindFastStatus(pi) {
+  const publish = (ctx, tier) => {
+    if (ctx.mode === 'rpc') {
+      ctx.ui.setStatus('agent-dash-fast', tier === 'fast' || tier === 'priority' ? tier : undefined);
+    }
+  };
+  pi.on('session_start', (_event, ctx) => publish(ctx));
+  pi.on('model_select', (_event, ctx) => publish(ctx));
+  pi.on('before_provider_request', (event, ctx) => {
+    publish(ctx, event.payload?.service_tier);
+  });
+  // Other extensions can rewrite the payload after our hook. Responses carry
+  // the server's resolved tier, including when a requested tier was downgraded.
+  pi.on('provider_stream_event', (event, ctx) => {
+    const response = event.data?.response;
+    if (event.provider === ctx.model?.provider && event.model === ctx.model?.id
+        && response && Object.hasOwn(response, 'service_tier')) {
+      publish(ctx, response.service_tier);
+    }
+  });
 }
 
 export function bindControlChannel(pi, handle, input = process.stdin) {

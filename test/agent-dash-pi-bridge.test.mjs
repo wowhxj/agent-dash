@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { registerBridge, readBuiltinCommands, bindControlChannel,
+import { registerBridge, readBuiltinCommands, bindControlChannel, bindFastStatus,
   BRIDGE_COMMAND, CATALOG_PREFIX, SECRET_PREFIX, RESULT_PREFIX } from '../agent-dash-pi-bridge.mjs';
 
 const commands = ['login', 'logout', 'name', 'session', 'reload', 'trust'].map(name => ({ name }));
@@ -44,6 +44,39 @@ function fixture() {
   return { pi, ctx, runtime, output, notices, inputs, saved, removed,
     get definition() { return definition; }, invoke: (command, args) => handle(encode(command, args), ctx) };
 }
+
+test('fast status follows structured tiers and resets on model/session changes', () => {
+  const handlers = new Map(), statuses = [];
+  const ctx = { mode: 'rpc', model: { provider: 'proxy', id: 'gpt' },
+    ui: { setStatus: (key, value) => statuses.push([key, value]) } };
+  bindFastStatus({ on: (name, handler) => handlers.set(name, handler) });
+  const emit = (name, event = {}) => handlers.get(name)(event, ctx);
+  emit('session_start');
+  for (const tier of ['priority', 'fast', 'auto', 'default', undefined]) {
+    const payload = { service_tier: tier, private: 'NOT-EXPORTED' };
+    assert.equal(emit('before_provider_request', { payload }), undefined);
+    assert.equal(payload.service_tier, tier);
+    assert.equal(statuses.at(-1)[1], ['priority', 'fast'].includes(tier) ? tier : undefined);
+  }
+  emit('provider_stream_event', { provider: 'proxy', model: 'gpt',
+    data: { response: { service_tier: 'priority' } } });
+  assert.equal(statuses.at(-1)[1], 'priority');
+  const count = statuses.length;
+  emit('provider_stream_event', { provider: 'other', model: 'gpt',
+    data: { response: { service_tier: 'default' } } });
+  emit('provider_stream_event', { provider: 'proxy', model: 'gpt', data: {} });
+  assert.equal(statuses.length, count);
+  emit('provider_stream_event', { provider: 'proxy', model: 'gpt',
+    data: { response: { service_tier: 'default' } } });
+  assert.equal(statuses.at(-1)[1], undefined);
+  emit('model_select');
+  assert.deepEqual(statuses.at(-1), ['agent-dash-fast', undefined]);
+  ctx.mode = 'tui';
+  const rpcCount = statuses.length;
+  emit('before_provider_request', { payload: { service_tier: 'fast' } });
+  assert.equal(statuses.length, rpcCount);
+  assert(!JSON.stringify(statuses).includes('NOT-EXPORTED'));
+});
 
 test('advertises an exact native catalog without model commands', () => {
   const f = fixture();
