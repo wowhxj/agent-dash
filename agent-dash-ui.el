@@ -13,6 +13,7 @@
 (require 'agent-dash-input)
 (require 'agent-dash-images)
 (require 'agent-dash-queue)
+(require 'agent-dash-notify)
 (require 'markdown-mode)
 
 (defgroup agent-dash-ui nil "Chat buffer of `agent-dash'." :group (quote agent-dash))
@@ -521,6 +522,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (add-hook 'completion-at-point-functions #'agent-dash--file-capf nil t)
   (add-hook 'kill-buffer-hook #'agent-dash--on-kill nil t)
   (add-hook 'post-command-hook #'agent-dash--schedule-answer nil t)
+  (add-hook 'post-command-hook #'agent-dash-notify--seen nil t)
   (add-hook 'change-major-mode-hook #'agent-dash--stop-answer-timer nil t)
   (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t))
 
@@ -610,8 +612,10 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (agent-dash--stop-spinner)
   (agent-dash--stop-answer-timer)
   (when-let* ((s agent-dash--session))
+    (agent-dash-notify--clear s)
     (when (agent-dash-queue-managed-p s) (agent-dash-queue-disconnect s))
     (setq agent-dash--sessions (delq s agent-dash--sessions))
+    (force-mode-line-update t)
     (unless agent-dash--quitting
       (agent-dash-backend-detach (agent-dash-session-backend s) s)))
   (dolist (window (get-buffer-window-list (current-buffer) nil (selected-frame)))

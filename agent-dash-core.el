@@ -25,6 +25,9 @@
 (defvar agent-dash-backends nil
   "Backend symbols available to `agent-dash'; each backend file adds one.")
 
+(defvar agent-dash-replaying nil
+  "Non-nil while applying historical records, rather than live events.")
+
 (defvar agent-dash-event-functions nil
   "Abnormal hook receiving (SESSION EVENT), including lifecycle-only events.")
 

@@ -166,6 +166,8 @@ CALLBACK, if non-nil, receives the response."
         (agent-dash-emit session (list :type 'notice :id uuid
                                        :text "earlier context compacted")))
        ((when-let* ((text (agent-dash-claude--prompt-text event)))
+          (unless (or agent-dash-replaying (string-prefix-p "[Request interrupted" text))
+            (agent-dash-emit session '(:type run :state running)))
           (agent-dash-emit session
                            (if (string-prefix-p "[Request interrupted" text)
                                (list :type 'notice :id uuid :text "interrupted")
@@ -238,7 +240,9 @@ CALLBACK, if non-nil, receives the response."
                   (not (string-blank-p text)))
              (agent-dash-emit session (list :type 'assistant :id (concat "r" uuid)
                                             :text text :final t)))))
-         (agent-dash-emit session '(:type run :state idle)))
+         (agent-dash-emit session (list :type 'run :state 'idle
+                                        :outcome (if (agent-dash-jget e "is_error")
+                                                     'error 'ended))))
         ("command_lifecycle"
          (let ((id (agent-dash-jget e "command_uuid"))
                (queued (agent-dash-data session :queued)))
@@ -307,10 +311,11 @@ Recover the startup record for sessions opened before this feature loaded."
 
 (defun agent-dash-claude--replay-file (session file)
   "Feed every record of FILE to SESSION."
-  (when (file-readable-p file)
-    (dolist (line (agent-dash-file-lines file))
-      (unless (string-empty-p line)
-        (agent-dash-claude--record session (agent-dash-json-read line))))))
+  (let ((agent-dash-replaying t))
+    (when (file-readable-p file)
+      (dolist (line (agent-dash-file-lines file))
+        (unless (string-empty-p line)
+          (agent-dash-claude--record session (agent-dash-json-read line)))))))
 
 (cl-defmethod agent-dash-backend-start ((_ (eql claude)) session &optional resume-id)
   "Claude `agent-dash-backend-start' for SESSION and RESUME-ID."

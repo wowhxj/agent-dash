@@ -226,9 +226,15 @@
        (agent-dash-emit session (list :type 'request-done :id (plist-get request :id)
                                       :status 'cancelled))))
     ("agent_settled"
-     (when (member (agent-dash-data session :queue-pi-stop) '("error" "aborted"))
+     (when (or (agent-dash-jget record "aborted")
+               (member (agent-dash-data session :queue-pi-stop) '("error" "aborted")))
        (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
-     (agent-dash-emit session '(:type run :state idle))
+     (agent-dash-emit session
+                      (list :type 'run :state 'idle
+                            :outcome (if (agent-dash-jget record "aborted") 'cancelled
+                                       (pcase (agent-dash-data session :queue-pi-stop)
+                                         ("error" 'error) ("aborted" 'cancelled)
+                                         (_ 'ended)))))
      (agent-dash-pi--refresh-stats session))
     ((or "turn_start" "turn_end" "compaction_end")
      (agent-dash-pi--refresh-stats session))

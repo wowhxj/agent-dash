@@ -387,7 +387,13 @@ This runs on protocol input, never during display-only redraw."
         ("turn/end"
          (unless (member (agent-dash-jget data "reason" "kind") '(nil "completed"))
            (agent-dash-delivery-result session (agent-dash-data session :queue-inflight) nil))
-         (agent-dash-emit session '(:type run :state idle))
+         (agent-dash-emit session
+                          (list :type 'run :state 'idle
+                                :outcome (cond
+                                          ((agent-dash-jget data "reason" "error") 'error)
+                                          ((equal (agent-dash-jget data "reason" "kind")
+                                                  "cancelled") 'cancelled)
+                                          (t 'ended))))
          (let ((kind (agent-dash-jget data "reason" "kind")))
            (unless (member kind '(nil "completed"))
              (agent-dash-emit session
@@ -438,7 +444,8 @@ This runs on protocol input, never during display-only redraw."
        (pcase (agent-dash-jget value "type")
          ("snapshot"
           (dolist (record (agent-dash-jget value "records"))
-            (agent-dash-dsh--event session (agent-dash-jget record "event")))
+            (let ((agent-dash-replaying t))
+              (agent-dash-dsh--event session (agent-dash-jget record "event"))))
           (let ((values (copy-hash-table
                          (or (agent-dash-jget value "projections" "values")
                              (make-hash-table :test #'equal)))))
@@ -612,7 +619,7 @@ This runs on protocol input, never during display-only redraw."
               ((equal (agent-dash-jget data "streamId") "agent-dash-state")
                (when (equal (agent-dash-jget data "type") "item")
                  (agent-dash-emit
-                  session (list :type 'run
+                  session (list :type 'run :snapshot t
                                 :state (if (agent-dash-jget data "value" "running")
                                            'running 'idle)))))
               ((equal (agent-dash-jget data "streamId") "agent-dash-control")

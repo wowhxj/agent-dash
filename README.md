@@ -60,6 +60,16 @@ Unsent text-and-image messages use a unified local queue; backend-native queues 
 | `TAB` / `RET` on a tool or thinking line | Fold / unfold |
 | `M-x agent-dash-select-model` | Switch model |
 
+### Completion reminders
+
+Adaptive reminders are enabled by default: the selected chat stays quiet while Emacs has focus; other chats report in the echo area; when Emacs is unfocused, reminders use desktop notifications. macOS uses Emacs's built-in AppleScript interface; other platforms use built-in `notifications` and need a working D-Bus notification service. Delivery errors fall back to the echo area. OS permissions and Do Not Disturb may still suppress notifications; the delivery API cannot confirm that they were seen.
+
+Reminders contain only the agent, project directory name, short session ID and `Run ended` / `Run failed`, never conversation text. A run ending does not claim the entire task succeeded. History replay, reconnect snapshots, explicit cancellation and disconnection do not generate completion reminders. Automatic follow-ups are coalesced until the queue settles. Active minibuffer input defers echo-area reminders, but does not block desktop delivery after switching away from Emacs. Only chats attached in this Emacs are monitored; closing a chat or exiting Emacs stops its reminders.
+
+The global mode line uses standard `global-mode-string` to show compact counts such as `?1 ✓2`: `?1`, highlighted with `warning`, means one chat awaits permission, a choice or an answer; `✓2` means two chats have unread run completions. Counts are per chat, not per question or run. Zero counts disappear; nothing is shown when both are zero. Click a count to visit that category; repeated request clicks cycle through waiting chats. Selecting a chat while Emacs has focus acknowledges its unread completion, but requests remain until answered, cancelled or withdrawn. Transient notification delivery does not acknowledge a completion. Fully custom mode lines must include `global-mode-string` to display these counts.
+
+Set `(setq agent-dash-notify nil)` to disable transient reminders and global counts without changing the per-chat activity indicator. Unknown terminal focus is treated conservatively as still inside Emacs.
+
 ### Multimodal queues
 
 While running, `RET` / `C-c C-c` stages one follow-up containing the entire text-and-image message. Follow-ups dispatch one at a time after the whole run settles, not after an intermediate final message. `C-c C-s` stages steering without injecting it. Open the queue with `C-c q`:
