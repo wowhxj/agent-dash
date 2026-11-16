@@ -39,8 +39,131 @@ ITEM is nil when only session-level state (run, queue, meta) changed.")
   (state 'idle) (queue nil) (meta nil) (requests nil)
   (data nil))
 
+(defvar agent-dash--laying-out nil
+  "Non-nil while the agent tab's window tree is being rearranged.")
+
+(defun agent-dash--layout-windows ()
+  "Return main windows in stable left-to-right, top-to-bottom order."
+  (sort (window-list nil 'nomini (frame-first-window))
+        (lambda (a b)
+          (let ((a (window-edges a)) (b (window-edges b)))
+            (if (= (car a) (car b)) (< (cadr a) (cadr b))
+              (< (car a) (car b)))))))
+
+(defun agent-dash--layout-signature ()
+  "Return window identities and frame geometry, excluding manual resizing."
+  (list (agent-dash--layout-windows)
+        (window-pixel-width (frame-root-window))
+        (window-pixel-height (frame-root-window))))
+
+(defun agent-dash--layout-columns (windows)
+  "Choose a feasible grid column count for WINDOWS in the current frame."
+  (let* ((root (frame-root-window))
+         (count (length windows))
+         (min-width (apply #'max (mapcar (lambda (w) (window-min-size w t)) windows)))
+         (min-height (apply #'max (mapcar #'window-min-size windows)))
+         best score)
+    (dotimes (index count)
+      (let* ((columns (1+ index))
+             (rows (ceiling count columns))
+             ;; Favor readable landscape cells, penalizing unused grid slots.
+             (cost (+ (abs (log (/ (* 1.0 (window-pixel-width root) rows)
+                                   (* (window-pixel-height root) columns 1.4))))
+                      (/ (* 2.0 (- (* columns rows) count)) count))))
+        (when (and (>= (window-total-width root) (* columns min-width))
+                   (>= (window-total-height root) (* rows min-height))
+                   (or (null score) (< cost score)))
+          (setq best columns score cost))))
+    best))
+
+(defun agent-dash--layout-grid-p (windows columns)
+  "Whether WINDOWS already form a grid with COLUMNS equal-width columns."
+  (let* ((groups (seq-group-by (lambda (w) (car (window-edges w))) windows))
+         (count (length windows))
+         (edges (window-edges (frame-root-window))))
+    (and (= (length groups) columns)
+         (cl-loop for (_ . group) in groups
+                  for index from 0
+                  always
+                  (and (= (length group) (+ (/ count columns)
+                                            (if (< index (% count columns)) 1 0)))
+                       (= (cadr (window-edges (car group))) (cadr edges))
+                       (= (nth 3 (window-edges (car (last group)))) (nth 3 edges))
+                       (= (length (delete-dups
+                                   (mapcar (lambda (w) (nth 2 (window-edges w))) group)))
+                          1))))))
+
+(defun agent-dash--layout-rebuild (windows columns)
+  "Rebuild WINDOWS into COLUMNS columns, retaining views and quit records."
+  (let* ((configuration (current-window-configuration))
+         (selected (selected-window))
+         (states (mapcar (lambda (w) (list w (window-state-get w)
+                                           (copy-tree (window-parameters w)))) windows))
+         (count (length windows))
+         (base (car windows))
+         (window-combination-limit nil)
+         (window-combination-resize nil)
+         mapping created)
+    (condition-case err
+        (progn
+          (delete-other-windows base)
+          (dotimes (column columns)
+            (let* ((remaining (- columns column))
+                   (next (when (> remaining 1)
+                           (split-window base (/ (window-total-width base) remaining)
+                                         'right)))
+                   (rows (+ (/ count columns) (if (< column (% count columns)) 1 0)))
+                   (cell base))
+              (dotimes (row rows)
+                (push cell created)
+                (when (< row (1- rows))
+                  (setq cell (split-window cell (/ (window-total-height cell) (- rows row))
+                                           'below))))
+              (setq base next)))
+          (setq created (nreverse created)
+                mapping (cl-mapcar #'cons windows created))
+          (cl-mapc
+           (lambda (state window)
+             (window-state-put (nth 1 state) window t)
+             (dolist (parameter (nth 2 state))
+               (set-window-parameter window (car parameter) (cdr parameter))))
+           states created)
+          (dolist (window created)
+            (when-let* ((quit (copy-sequence (window-parameter window 'quit-restore)))
+                        (replacement (cdr (assq (nth 2 quit) mapping))))
+              (setf (nth 2 quit) replacement)
+              (set-window-parameter window 'quit-restore quit)))
+          (select-window (cdr (assq selected mapping))))
+      (error
+       (set-window-configuration configuration)
+       (signal (car err) (cdr err))))))
+
+(defun agent-dash--layout-changed ()
+  "Reflow only the agent tab after window additions, deletions or frame resizing."
+  (when (and (not agent-dash--laying-out)
+             (not (window-minibuffer-p (selected-window)))
+             (equal (alist-get 'name (tab-bar--current-tab)) "agent-dash"))
+    (let ((signature (agent-dash--layout-signature)))
+      (unless (equal signature (frame-parameter nil 'agent-dash-layout-signature))
+        (let* ((agent-dash--laying-out t)
+               (windows (car signature))
+               ;; Dedicated, side and atomic windows keep their native layout contracts.
+               (columns (unless (seq-some
+                                 (lambda (w)
+                                   (or (window-dedicated-p w)
+                                       (window-parameter w 'window-side)
+                                       (window-parameter w 'window-atom))) windows)
+                          (agent-dash--layout-columns windows))))
+          (when (and columns (> (length windows) 1))
+            (if (agent-dash--layout-grid-p windows columns)
+                (balance-windows)
+              (agent-dash--layout-rebuild windows columns)))
+          (set-frame-parameter nil 'agent-dash-layout-signature
+                               (agent-dash--layout-signature)))))))
+
 (defun agent-dash-select-tab ()
   "Select the current frame's `agent-dash' tab; return t if newly created."
+  (add-hook 'window-configuration-change-hook #'agent-dash--layout-changed)
   (unless (equal (alist-get 'name (tab-bar--current-tab)) "agent-dash")
     (if (seq-some (lambda (tab) (equal (alist-get 'name tab) "agent-dash"))
                   (tab-bar-tabs))
@@ -52,9 +175,9 @@ ITEM is nil when only session-level state (run, queue, meta) changed.")
 
 (defun agent-dash-pop-to-buffer (buffer)
   "Show BUFFER in the current frame's `agent-dash' tab.
-Reuse its visible window, otherwise split the largest window's longer
-pixel dimension without replacing other buffers.  Never create another
-frame; signal an error when no window can be split."
+Reuse its visible window, otherwise split and rebalance the tab's grid
+without replacing other buffers.  Never create another frame; signal an
+error when no window can be split."
   (let* ((new-tab (agent-dash-select-tab))
          (buffer (get-buffer-create buffer))
          (window
@@ -74,6 +197,7 @@ frame; signal an error when no window can be split."
     (unless (eq (window-buffer window) buffer)
       (window--display-buffer buffer window (if new-tab 'reuse 'window)))
     (select-window window)
+    (agent-dash--layout-changed)
     buffer))
 
 (defun agent-dash-uuid ()
