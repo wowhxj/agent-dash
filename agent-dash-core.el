@@ -369,10 +369,22 @@ find an early match without reading small files twice."
                         (agent-dash-session-requests session)
                         :key (lambda (r) (plist-get r :id)) :test #'equal))
        (when-let* ((dialog (agent-dash-item session (cons 'request (plist-get event :id))))
-                   (pending (eq (plist-get dialog :status) 'pending)))
+                   (updatable
+                    (or (eq (plist-get dialog :status) 'pending)
+                        ;; A synchronous backend may acknowledge before the UI
+                        ;; supplies the answer. Enrich once, without reopening it.
+                        (and (eq (plist-get dialog :status) 'answered)
+                             (plist-member event :answer)
+                             (not (plist-member dialog :answer))))))
          (setq item (agent-dash--upsert
-                     session (list :id (plist-get dialog :id) :type 'request
-                                   :status (or (plist-get event :status) 'answered))))))
+                     session (append (list :id (plist-get dialog :id) :type 'request
+                                           :status (if (eq (plist-get dialog :status) 'pending)
+                                                       (or (plist-get event :status) 'answered)
+                                                     'answered))
+                                     (when (and (plist-member event :answer)
+                                                (not (eq (plist-get dialog :kind) 'secret))
+                                                (not (eq (plist-get event :status) 'cancelled)))
+                                       (list :answer (plist-get event :answer))))))))
       ((or 'delivery 'local-queue) nil)
       (type (error "Unknown agent-dash event type: %S" type)))
     (run-hook-with-args 'agent-dash-event-functions session event)

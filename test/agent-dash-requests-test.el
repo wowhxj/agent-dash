@@ -34,6 +34,89 @@
    (agent-dash-refresh-chat)
    (should (equal (agent-dash--input) "unfinished draft"))))
 
+(ert-deftest agent-dash-request-answers-remain-visible-after-refresh ()
+  "Retain exact non-secret answers, including negative confirmations."
+  (dolist (case '((select "项目列表" "You: 项目列表")
+                  (input "第一行\n第二行" "You: 第一行\n第二行")
+                  (input "" "You: (skipped)")
+                  (confirm t "You: Yes") (confirm nil "You: No")
+                  (permission allow "You: Allow") (permission deny "You: Deny")))
+    (agent-dash-request-test-with-chat
+     (agent-dash--set-input "unfinished draft")
+     (agent-dash-emit session (list :type 'request :id "answer" :title "Question"
+                                    :kind (nth 0 case) :options '("项目列表")))
+     (cl-letf (((symbol-function 'agent-dash--ask) (lambda (_) (nth 1 case))))
+       (agent-dash-answer))
+     (let ((dialog (agent-dash-item session '(request . "answer"))))
+       (should (plist-member dialog :answer))
+       (should (equal (plist-get dialog :answer) (nth 1 case))))
+     (should (string-search (nth 2 case) (buffer-string)))
+     (agent-dash-refresh-chat)
+     (should (string-search (nth 2 case) (buffer-string)))
+     (should (equal (agent-dash--input) "unfinished draft")))))
+
+(ert-deftest agent-dash-request-question-answers-are-paired-with-their-questions ()
+  "Show each answer beside its own question, not as an unlabelled list."
+  (agent-dash-request-test-with-chat
+   (agent-dash-emit session '(:type request :id "questions" :kind questions
+                                    :questions ((:question "First")
+                                                (:question "Second" :multi t)
+                                                (:question "Third"))))
+   (cl-letf (((symbol-function 'agent-dash--ask)
+              (lambda (_) '("A" ("B" "自定义") ""))))
+     (agent-dash-answer))
+   (let ((text (agent-dash--request-text
+                (agent-dash-item session '(request . "questions")))))
+     (should (string-search "First\nYou: A\n" text))
+     (should (string-search "Second\nYou: B, 自定义\n" text))
+     (should (string-search "Third\nYou: (skipped)\n" text)))))
+
+(ert-deftest agent-dash-request-answer-survives-synchronous-backend-completion ()
+  "A backend acknowledgement can arrive before the local completion event."
+  (agent-dash-request-test-with-chat
+   (agent-dash-emit session '(:type request :id "race" :kind input))
+   (cl-letf (((symbol-function 'agent-dash--ask) (lambda (_) "my answer"))
+             ((symbol-function 'agent-dash-backend-respond)
+              (lambda (&rest _)
+                (agent-dash-emit session '(:type request-done :id "race")))))
+     (agent-dash-answer))
+   (should (string-search "You: my answer" (buffer-string)))
+   (agent-dash-emit session '(:type request-done :id "race" :answer "duplicate"))
+   (should (equal (plist-get (agent-dash-item session '(request . "race")) :answer)
+                  "my answer"))))
+
+(ert-deftest agent-dash-request-secret-answer-is-never-retained ()
+  "Send secrets only to the backend, not timeline items or event hooks."
+  (agent-dash-request-test-with-chat
+   (agent-dash-emit session '(:type request :id "secret" :kind secret))
+   (let (events sent
+                (agent-dash-event-functions nil))
+     (add-hook 'agent-dash-event-functions (lambda (_session event) (push event events)))
+     (cl-letf (((symbol-function 'agent-dash--ask) (lambda (_) "PRIVATE-ANSWER"))
+               ((symbol-function 'agent-dash-backend-respond)
+                (lambda (_backend _session _request answer) (setq sent answer))))
+       (agent-dash-answer))
+     (should (equal sent "PRIVATE-ANSWER"))
+     (should-not (plist-member (agent-dash-item session '(request . "secret")) :answer))
+     (should-not (string-search "PRIVATE-ANSWER"
+                                (format "%S" (list events (agent-dash-session-items session))))))
+   (agent-dash-refresh-chat)
+   (should-not (string-search "PRIVATE-ANSWER" (buffer-string)))
+   (should (string-search "You: [hidden]" (buffer-string)))))
+
+(ert-deftest agent-dash-request-failed-response-does-not-claim-an-answer ()
+  "An unsuccessful backend write leaves the question pending and retryable."
+  (agent-dash-request-test-with-chat
+   (agent-dash-emit session '(:type request :id "failed" :kind input))
+   (cl-letf (((symbol-function 'agent-dash--ask) (lambda (_) "not delivered"))
+             ((symbol-function 'agent-dash-backend-respond)
+              (lambda (&rest _) (error "Offline backend"))))
+     (should-error (agent-dash-answer)))
+   (let ((dialog (agent-dash-item session '(request . "failed"))))
+     (should (eq (plist-get dialog :status) 'pending))
+     (should-not (plist-member dialog :answer)))
+   (should-not (string-search "You: not delivered" (buffer-string)))))
+
 (ert-deftest agent-dash-request-auto-answer-is-scheduled-not-inline ()
   (agent-dash-request-test-with-chat
    (let ((noninteractive nil) scheduled asked)

@@ -860,6 +860,26 @@ Return the session."
       (setq agent-dash--quitting t)
       (kill-buffer))))
 
+(defun agent-dash--request-answer-text (request &optional index)
+  "Render REQUEST's recorded answer, or question INDEX in a question group."
+  (when (and (eq (plist-get request :status) 'answered)
+             (or (eq (plist-get request :kind) 'secret) (plist-member request :answer)))
+    (let* ((kind (plist-get request :kind))
+           (answer (if (eq kind 'questions)
+                       (nth index (plist-get request :answer))
+                     (plist-get request :answer))))
+      (propertize
+       (concat "You: "
+               (pcase kind
+                 ('secret "[hidden]")
+                 ('confirm (if answer "Yes" "No"))
+                 ('permission (if (eq answer 'allow) "Allow" "Deny"))
+                 (_ (cond ((or (null answer) (equal answer "")) "(skipped)")
+                          ((listp answer) (string-join answer ", "))
+                          (t answer))))
+               "\n")
+       'face 'agent-dash-user-face))))
+
 (defun agent-dash--request-text (request)
   "Render REQUEST visibly, independently of folded process output."
   (concat
@@ -874,11 +894,14 @@ Return the session."
      (concat "Hint: " placeholder "\n"))
    (mapconcat (lambda (option) (concat "  • " option "\n"))
               (plist-get request :options) "")
-   (mapconcat (lambda (question)
-                (concat (plist-get question :question) "\n"
-                        (mapconcat (lambda (option) (concat "  • " option "\n"))
-                                   (plist-get question :options) "")))
-              (plist-get request :questions) "")))
+   (if (eq (plist-get request :kind) 'questions)
+       (cl-loop for question in (plist-get request :questions)
+                for index from 0
+                concat (concat (plist-get question :question) "\n"
+                               (mapconcat (lambda (option) (concat "  • " option "\n"))
+                                          (plist-get question :options) "")
+                               (agent-dash--request-answer-text request index)))
+     (agent-dash--request-answer-text request))))
 
 (defun agent-dash--stop-answer-timer ()
   "Stop this chat's deferred dialog timer."
@@ -957,8 +980,11 @@ Return the session."
         ;; Timers/process filters can withdraw a dialog while the user reads it.
         (when (memq request (agent-dash-session-requests s))
           (agent-dash-backend-respond (agent-dash-session-backend s) s request answer)
-          (agent-dash-emit s (list :type 'request-done :id (plist-get request :id)
-                                   :status (if cancelled 'cancelled 'answered))))))))
+          (agent-dash-emit
+           s (append (list :type 'request-done :id (plist-get request :id)
+                           :status (if cancelled 'cancelled 'answered))
+                     (unless (or cancelled (eq (plist-get request :kind) 'secret))
+                       (list :answer answer)))))))))
 
 (provide 'agent-dash-ui)
 ;;; agent-dash-ui.el ends here
