@@ -40,6 +40,12 @@
   "Messages of history in the first snapshot of a session."
   :type 'integer)
 
+(defcustom agent-dash-dsh-permission "auto"
+  "Permission preset for new DSH sessions; nil keeps the Host default.
+Resuming a session preserves its existing permission preset."
+  :type '(choice (const nil) (const "auto") (const "read-only")
+                 (const "workspace-write") (const "danger-full-access")))
+
 (add-to-list 'agent-dash-backends 'dsh t)
 
 (defvar agent-dash-dsh--host nil
@@ -170,8 +176,8 @@ once; RETRIED marks that second attempt."
           (error "DSH %s: %s %s" method (agent-dash-jget result "error" "code")
                  (agent-dash-jget result "error" "message"))))))))
 
-(defun agent-dash-dsh--socket (on-open on-item)
-  "Open a remote.mux websocket; ON-OPEN gets the socket, ON-ITEM each frame."
+(defun agent-dash-dsh--socket (on-open on-item &optional on-close)
+  "Open remote.mux with ON-OPEN, ON-ITEM and optional ON-CLOSE callbacks."
   (let ((host (or agent-dash-dsh--host (agent-dash-dsh--login))))
     (websocket-open
      (concat "ws" (string-remove-prefix "http" (plist-get host :base)) "api/remote.mux")
@@ -179,7 +185,7 @@ once; RETRIED marks that second attempt."
      :on-open on-open
      :on-message (lambda (_ws frame)
                    (funcall on-item (agent-dash-json-read (websocket-frame-payload frame))))
-     :on-close #'ignore)))
+     :on-close (or on-close #'ignore))))
 
 (defun agent-dash-dsh--open-frame (stream endpoint args)
   "Return the frame opening STREAM on ENDPOINT with ARGS."
@@ -508,14 +514,28 @@ This runs on protocol input, never during display-only redraw."
 (defun agent-dash-dsh--ensure-events ()
   "Subscribe once to the Host-wide $events stream."
   (unless (and (plist-get agent-dash-dsh--events :socket)
-               (websocket-openp (plist-get agent-dash-dsh--events :socket)))
+               (memq (websocket-ready-state (plist-get agent-dash-dsh--events :socket))
+                     '(open connecting)))
     (setq agent-dash-dsh--events
           (list :socket (agent-dash-dsh--socket
                          (lambda (ws)
                            (websocket-send-text
                             ws (agent-dash-dsh--open-frame "dsh-events" "$events"
                                                            (make-hash-table))))
-                         #'agent-dash-dsh--events-item)))))
+                         #'agent-dash-dsh--events-item
+                         (lambda (ws)
+                           (when (eq ws (plist-get agent-dash-dsh--events :socket))
+                             (setq agent-dash-dsh--events nil)
+                             ;; Old client IDs can no longer answer these requests.
+                             (maphash
+                              (lambda (id entry)
+                                (agent-dash-emit
+                                 (car entry) (list :type 'request-done :id id
+                                                   :status 'interrupted)))
+                              agent-dash-dsh--waiting)
+                             (clrhash agent-dash-dsh--waiting)
+                             (dolist (session agent-dash-dsh--session-list)
+                               (agent-dash-dsh--disconnected session)))))))))
 
 ;;;; Backend methods
 
@@ -533,6 +553,35 @@ This runs on protocol input, never during display-only redraw."
   (agent-dash-dsh--publish-metrics
    session (or (agent-dash-data session :projections) (make-hash-table :test #'equal))))
 
+(defun agent-dash-dsh--disconnected (session)
+  "Mark SESSION disconnected and schedule a single bounded-backoff retry."
+  (unless (agent-dash-data session :detached)
+    (agent-dash-emit session '(:type run :state dead))
+    (unless (timerp (agent-dash-data session :reconnect-timer))
+      (let ((delay (or (agent-dash-data session :reconnect-delay) 2)))
+        (agent-dash-set-data session :reconnect-delay (min 30 (* 2 delay)))
+        (agent-dash-set-data
+         session :reconnect-timer
+         (run-at-time delay nil #'agent-dash-dsh--reconnect session))))))
+
+(defun agent-dash-dsh--reconnect (session)
+  "Reconnect SESSION without prompting, cancelling or changing permissions."
+  (agent-dash-set-data session :reconnect-timer nil)
+  (unless (agent-dash-data session :detached)
+    (let ((old (agent-dash-data session :socket)))
+      (agent-dash-set-data session :socket nil)
+      (when (and old (websocket-openp old)) (websocket-close old)))
+    (condition-case err
+        (progn
+          ;; Desktop may have restarted and published a new bridge URL.
+          (setq agent-dash-dsh--host nil)
+          (agent-dash-dsh--ensure-events)
+          (agent-dash-dsh--follow session))
+      (error
+       (agent-dash-emit session (list :type 'notice :id "dsh-reconnect-error"
+                                      :level 'warning :text (error-message-string err)))
+       (agent-dash-dsh--disconnected session)))))
+
 (defun agent-dash-dsh--follow (session)
   "Follow SESSION's events on a new websocket."
   (agent-dash-dsh--load-default-model session)
@@ -549,10 +598,23 @@ This runs on protocol input, never during display-only redraw."
                                   :assistantStream t))))
         (websocket-send-text
          ws (agent-dash-dsh--open-frame "agent-dash-control" "session/control"
-                                        (make-hash-table))))
+                                        (make-hash-table)))
+        (websocket-send-text
+         ws (agent-dash-dsh--open-frame "agent-dash-state" "session/observeState"
+                                        (list :request (list :sessionId sid)))))
       (lambda (data)
         (cond ((equal (agent-dash-jget data "streamId") sid)
-               (agent-dash-dsh--item session data))
+               (agent-dash-dsh--item session data)
+               (when (member (agent-dash-jget data "type") '("error" "end"))
+                 (agent-dash-dsh--disconnected session))
+               (when (equal (agent-dash-jget data "value" "type") "snapshot")
+                 (agent-dash-set-data session :reconnect-delay nil)))
+              ((equal (agent-dash-jget data "streamId") "agent-dash-state")
+               (when (equal (agent-dash-jget data "type") "item")
+                 (agent-dash-emit
+                  session (list :type 'run
+                                :state (if (agent-dash-jget data "value" "running")
+                                           'running 'idle)))))
               ((equal (agent-dash-jget data "streamId") "agent-dash-control")
                (pcase (agent-dash-jget data "type")
                  ("item" (agent-dash-dsh--control-item
@@ -560,7 +622,10 @@ This runs on protocol input, never during display-only redraw."
                  ("error"
                   (agent-dash-emit
                    session '(:type notice :id "dsh-metrics-error" :level warning
-                                   :text "DSH metrics unavailable; reconnect")))))))))))
+                                   :text "DSH metrics unavailable; reconnect")))))))
+      (lambda (ws)
+        (when (eq ws (agent-dash-data session :socket))
+          (agent-dash-dsh--disconnected session)))))))
 
 (cl-defmethod agent-dash-backend-start ((_ (eql dsh)) session &optional resume-id)
   "DSH `agent-dash-backend-start' for SESSION and RESUME-ID."
@@ -580,6 +645,10 @@ This runs on protocol input, never during display-only redraw."
                     "sessionId")))))
     (unless sid (error "DSH Host did not return a session id"))
     (agent-dash-set-data session :sid sid)
+    (agent-dash-set-data session :detached nil)
+    (when (and (not resume-id) agent-dash-dsh-permission)
+      (agent-dash-backend-send
+       'dsh session (concat "/permission " agent-dash-dsh-permission) nil nil))
     (push session agent-dash-dsh--session-list)
     (agent-dash-dsh--ensure-events)
     (agent-dash-dsh--follow session)))
@@ -654,6 +723,10 @@ This runs on protocol input, never during display-only redraw."
 
 (cl-defmethod agent-dash-backend-detach ((_ (eql dsh)) session)
   "DSH `agent-dash-backend-detach' for SESSION."
+  (agent-dash-set-data session :detached t)
+  (when-let* ((timer (agent-dash-data session :reconnect-timer)))
+    (cancel-timer timer)
+    (agent-dash-set-data session :reconnect-timer nil))
   (setq agent-dash-dsh--session-list (delq session agent-dash-dsh--session-list))
   (let ((socket (agent-dash-data session :socket)))
     (when (and socket (websocket-openp socket))

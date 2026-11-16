@@ -29,6 +29,10 @@ Requires Emacs 29.1+, `markdown-mode`, `websocket`, `transient`, and the CLIs of
 - `M-x agent-dash`: pick an agent and a directory, then start a new session.
 - `M-x agent-dash-hub`: list the sessions of every agent.
 
+New DSH sessions default to `auto` permissions; resumed sessions keep their existing preset.
+Customize `agent-dash-dsh-permission`, or set it to nil to keep the Host default.
+If the reply or interaction channel disconnects, the UI reports disconnected and retries automatically, restoring recent history, live run state and unanswered Host questions without resending prompts.
+
 ### Chat buffer
 
 User turns are highlighted; the bottom `You>` composer stays editable while history is read-only. The latest prompt is pinned above the conversation. Tools and thinking-only messages are grouped under `Process · N steps` per user turn. Only the active Process group expands automatically, showing compact step summaries; individual thinking and tool details stay folded until manually opened. When the backend confirms the entire run has ended, the group folds and the final answer stays visible. `RET`/`TAB` still toggles groups or individual details; manual choices persist during streaming. A single final message does not prematurely fold an ongoing run.

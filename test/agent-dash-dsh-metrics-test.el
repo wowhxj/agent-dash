@@ -172,7 +172,7 @@
                  (should (equal endpoint "session/modelCatalog"))
                  (agent-dash-json-read "{}")))
               ((symbol-function 'agent-dash-dsh--socket)
-               (lambda (on-open on-item)
+               (lambda (on-open on-item &optional _on-close)
                  (setq handler on-item)
                  (funcall on-open 'socket)
                  'socket))
@@ -180,7 +180,7 @@
                (lambda (_socket text) (push (agent-dash-json-read text) sent))))
       (agent-dash-dsh--follow session))
     (should (equal (mapcar (lambda (frame) (agent-dash-jget frame "endpoint")) sent)
-                   '("session/control" "session/follow")))
+                   '("session/observeState" "session/control" "session/follow")))
     (funcall handler
              (agent-dash-json-read
               (concat "{\"streamId\":\"agent-dash-control\",\"type\":\"item\","

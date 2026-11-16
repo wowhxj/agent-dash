@@ -29,6 +29,10 @@
 - `M-x agent-dash`：选择 Agent 和目录，新建会话。
 - `M-x agent-dash-hub`：列出所有 Agent 的会话。
 
+DSH 新建会话默认使用 `auto` 权限；恢复已有会话时保留原权限。
+可通过 `agent-dash-dsh-permission` 修改默认值，设为 nil 则沿用 Host 默认。
+回复流或提问/审批通道断开时，界面显示 disconnected 并自动重连；重连后刷新最近历史、实际运行状态和 Host 尚未回答的问题，不重发用户 prompt。
+
 ### 聊天 buffer
 
 用户回合高亮，底部 `You>` 输入区可编辑，历史区只读；顶部置顶最近一条用户消息。工具和纯 thinking 消息按用户回合收进 `Process · N steps`：处理中只自动展开当前 Process 分组，显示精简的步骤摘要；每条 thinking 和工具调用的细节仍默认折叠，按需手动展开。后端确认整轮结束后再折叠 Process，最终答复保持可见。仍可用 `RET`/`TAB` 手动切换整组或单步，流式更新不覆盖手动选择；不会因为收到单条 final 消息就提前折叠仍在运行的任务。
