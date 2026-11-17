@@ -214,24 +214,54 @@ error when no window can be split."
 (defvar agent-dash-history-warnings nil
   "Read warnings collected during a backend history scan.")
 
+(defconst agent-dash--sqlite-readonly-python
+  "import contextlib, json, pathlib, sqlite3, sys
+try:
+    with contextlib.closing(sqlite3.connect(
+            pathlib.Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        print(json.dumps([dict(row) for row in db.execute(sys.argv[2])], ensure_ascii=False))
+except sqlite3.Error as error:
+    print(error, file=sys.stderr)
+    sys.exit(1)
+"
+  "Read-only compatibility reader for macOS SQLite WAL open failures.")
+
 (defun agent-dash-sqlite-rows (file query)
   "Read QUERY rows from existing SQLite FILE without opening it for writing.
-Use the sqlite3 CLI with separate arguments, never shell interpolation.
+Use separate arguments, never shell interpolation.  On macOS, fall back
+from sqlite3 to Python3's read-only SQLite when WAL sidecar opening fails.
 Report stderr on failure, without mixing it into successful JSON output."
   (unless (file-readable-p file) (user-error "History index is not readable: %s" file))
   (let ((sqlite (or (executable-find "sqlite3")
                     (user-error "SQLite3 is required to read native session history")))
+        (reader "sqlite3")
         (stderr (make-temp-file "agent-dash-sqlite-")))
     (unwind-protect
         (with-temp-buffer
-          (let ((status (process-file sqlite nil (list (current-buffer) stderr) nil
-                                      "-readonly" "-json" file query)))
+          (let* ((status (process-file sqlite nil (list (current-buffer) stderr) nil
+                                       "-readonly" "-json" file query))
+                 (reason (with-temp-buffer
+                           (insert-file-contents stderr)
+                           (string-trim (buffer-string)))))
+            ;; Some Apple SQLite builds cannot initialize missing WAL/SHM through a
+            ;; read-only handle.  Never use immutable: it ignores live WAL.
+            (when (and (not (eq status 0)) (eq system-type 'darwin)
+                       (string-match-p "unable to open database file" reason))
+              (if-let* ((python (executable-find "python3")))
+                  (progn
+                    (erase-buffer)
+                    (setq reader "python3"
+                          status (process-file
+                                  python nil (list (current-buffer) stderr) nil
+                                  "-I" "-c" agent-dash--sqlite-readonly-python file query)
+                          reason (with-temp-buffer
+                                   (insert-file-contents stderr)
+                                   (string-trim (buffer-string)))))
+                (setq reason (concat reason "; Python3 is required for the macOS WAL fallback"))))
             (unless (eq status 0)
-              (let ((reason (with-temp-buffer
-                              (insert-file-contents stderr)
-                              (string-trim (buffer-string)))))
-                (error "Cannot read history index %s (sqlite3 exit %s): %s"
-                       file status (if (string-empty-p reason) "No error output" reason)))))
+              (error "Cannot read history index %s (%s exit %s): %s"
+                     file reader status (if (string-empty-p reason) "No error output" reason))))
           (unless (string-blank-p (buffer-string))
             (agent-dash-json-read (buffer-string))))
       (delete-file stderr))))

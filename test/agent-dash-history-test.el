@@ -101,6 +101,82 @@
                                     (secure-hash 'sha256 (current-buffer)))))))
       (delete-file file))))
 
+(ert-deftest agent-dash-history-test-sqlite-wal-without-sidecars ()
+  "Read a closed WAL database even when the system CLI cannot create sidecars."
+  (unless (executable-find "python3") (ert-skip "Python3 is not installed"))
+  (let* ((base (make-temp-file "dash-wal-readonly-" t))
+         (file (expand-file-name "history.sqlite" base)))
+    (unwind-protect
+        (progn
+          (should (zerop
+                   (process-file
+                    "python3" nil nil nil "-I" "-c"
+                    (concat "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); "
+                            "db.executescript(sys.argv[2]); db.close()")
+                    file "PRAGMA journal_mode=WAL; CREATE TABLE items(id INTEGER, title TEXT);
+INSERT INTO items VALUES(1, '用户会话');")))
+          (should-not (file-exists-p (concat file "-wal")))
+          (should-not (file-exists-p (concat file "-shm")))
+          (let* ((before (with-temp-buffer (insert-file-contents-literally file)
+                                           (secure-hash 'sha256 (current-buffer))))
+                 (row (car (agent-dash-sqlite-rows file "SELECT * FROM items"))))
+            (should (= (agent-dash-jget row "id") 1))
+            (should (equal (agent-dash-jget row "title") "用户会话"))
+            (should-error (agent-dash-sqlite-rows file "DELETE FROM items"))
+            (should (equal before (with-temp-buffer (insert-file-contents-literally file)
+                                                    (secure-hash 'sha256 (current-buffer)))))))
+      (delete-directory base t))))
+
+(ert-deftest agent-dash-history-test-sqlite-fallback-keeps-active-wal-and-readonly ()
+  "The compatibility reader sees committed WAL frames and refuses writes."
+  (unless (and (executable-find "python3")
+               (fboundp 'sqlite-available-p) (sqlite-available-p))
+    (ert-skip "Python3 and native SQLite are needed for this fixture"))
+  (let* ((base (make-temp-file "dash-wal-live-" t))
+         (file (expand-file-name "history.sqlite" base))
+         (sqlite (executable-find "sqlite3"))
+         (original (symbol-function 'process-file))
+         writer)
+    (unwind-protect
+        (progn
+          (agent-dash-history-test--database
+           file "PRAGMA journal_mode=WAL; CREATE TABLE items(id INTEGER);
+INSERT INTO items VALUES(1); PRAGMA wal_checkpoint(TRUNCATE);")
+          (setq writer (sqlite-open file nil))
+          (sqlite-execute writer "PRAGMA wal_autocheckpoint=0")
+          (sqlite-execute writer "INSERT INTO items VALUES(2)")
+          (let* ((wal (concat file "-wal"))
+                 (before (mapcar (lambda (path)
+                                   (with-temp-buffer (insert-file-contents-literally path)
+                                                     (secure-hash 'sha256 (current-buffer))))
+                                 (list file wal)))
+                 (system-type 'darwin)
+                 (python-calls 0))
+            ;; Force the failing CLI path, including on non-Apple test hosts.
+            (cl-letf (((symbol-function 'process-file)
+                       (lambda (program &rest args)
+                         (if (equal program sqlite)
+                             (progn
+                               (with-temp-file (cadr (nth 1 args))
+                                 (insert "unable to open database file (14)"))
+                               1)
+                           (cl-incf python-calls)
+                           (apply original program args)))))
+              (should (equal (mapcar (lambda (row) (agent-dash-jget row "id"))
+                                     (agent-dash-sqlite-rows file "SELECT * FROM items ORDER BY id"))
+                             '(1 2)))
+              (let ((failure (should-error (agent-dash-sqlite-rows file "DELETE FROM items"))))
+                (should (string-match-p "python3 exit 1" (error-message-string failure)))
+                (should (string-match-p "readonly database" (error-message-string failure))))
+              (should (= python-calls 2)))
+            (should (equal before
+                           (mapcar (lambda (path)
+                                     (with-temp-buffer (insert-file-contents-literally path)
+                                                       (secure-hash 'sha256 (current-buffer))))
+                                   (list file wal))))))
+      (when writer (sqlite-close writer))
+      (delete-directory base t))))
+
 (ert-deftest agent-dash-history-test-sqlite-errors-include-original-reason ()
   "A failed query must report SQLite's reason, not just the database path."
   (let ((file (make-temp-file "dash-sqlite-error-" nil ".sqlite")))
