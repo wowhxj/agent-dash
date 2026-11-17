@@ -55,6 +55,8 @@ Other chats keep their requests visible until selected or answered with
   "Marker where the next timeline item goes; advances on insertion.")
 (defvar-local agent-dash--input-start nil "Marker at the composer start.")
 (defvar-local agent-dash--input-overlay nil "Overlay decorating the composer.")
+(defvar-local agent-dash--attachment-overlay nil
+  "Overlay showing staged images on the separator before the composer.")
 (defvar-local agent-dash--spinner-index 0 "Current activity animation frame.")
 (defvar-local agent-dash--spinner-timer nil "Timer while this chat is running.")
 (defvar-local agent-dash--history nil "Sent prompts, newest first.")
@@ -564,9 +566,19 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (setq agent-dash--input-overlay
         (make-overlay agent-dash--input-start (point-max) nil nil t))
   (overlay-put agent-dash--input-overlay 'face 'agent-dash-input-face)
+  ;; A multiline before-string at the input position confuses redisplay's
+  ;; cursor placement (and IME preedit), especially for an empty draft.
+  ;; Anchor previews to the real separator newline instead.  Advance its
+  ;; front on transcript insertion, but never its rear on draft insertion.
+  (when (overlayp agent-dash--attachment-overlay)
+    (delete-overlay agent-dash--attachment-overlay))
+  (when-let* ((previews (agent-dash-image-attachments-string)))
+    (setq agent-dash--attachment-overlay
+          (make-overlay (1- agent-dash--input-start) agent-dash--input-start
+                        nil t nil))
+    (overlay-put agent-dash--attachment-overlay 'before-string previews))
   (overlay-put agent-dash--input-overlay 'before-string
-               (concat (agent-dash-image-attachments-string)
-                       (propertize "You> " 'face 'agent-dash-input-face)))
+               (propertize "You> " 'face 'agent-dash-input-face))
   ;; Empty composers have a zero-length overlay: :extend alone cannot
   ;; paint the area after the virtual prompt.  Fill to the window edge
   ;; with display-only space, never padding the draft with real text.
