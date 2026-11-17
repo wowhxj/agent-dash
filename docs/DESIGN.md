@@ -215,7 +215,7 @@ DSH 的 `session/follow` 快照提供初始投影；同一 websocket 同时订�
 
 ### 6.1 输入补全
 
-`agent-dash-input.el` 为五后端共用输入层：`TAB` 在 `/`、`@file`、`@session`、`@dash` 后调用标准 `completing-read`，保留 Vertico UI，在 picker 内可选启用 Orderless，不改全局 completion 配置。`@session` 限当前 Agent（跨项目），`@dash` 使用全 Agent Hub 清单，显示/匹配摘要、末句、项目、日期和完整 ID；同名会话不混淆。选中后生成已有 `agent-dash:` 引用格式，发送过滤器负责按原预算展开。目录读取不请求模型。替换范围用 marker 跟踪后台输出，取消或草稿被改动时不覆盖输入。
+`agent-dash-input.el` 为五后端共用输入层：`TAB` 在 `/`、`@file`、`@session` 后调用标准 `completing-read`，保留 Vertico UI，在 picker 内可选启用 Orderless，不改全局 completion 配置。`@session` 统一跨 Agent、跨项目引用，复用 Hub 默认可见规则，不继承 Hub 当前的 Agent、项目或仅存活筛选；空会话、子代理、归档及已确认无对话记录按同一规则过滤。存活状态沿用 Hub 判定并显示绿色 `●`；单行保留 Agent、ID、日期、项目、摘要和末句各列，长字段截断，完整元数据仍可匹配并悬停查看；同名会话不混淆。选中后生成已有 `agent-dash:` 引用格式，发送过滤器负责按原预算展开。目录读取不请求模型。替换范围用 marker 跟踪后台输出，取消或草稿被改动时不覆盖输入。
 
 `/` 默认合并本地命令与后端真实目录，按名称去重，本地命令优先；Pi 例外，只显示原生目录；`C-u TAB` 刷新目录。客户端 `/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`（及支持时的 `/model`）不发给模型，且不忽略多余参数。Pi 采用安装版内置目录（优先运行中桥接公布的清单）加 `get_commands`，不向其补全额外插入客户端别名；Claude 存 init.slash_commands（热载可从原 holder 日志恢复），DSH 用 commands/list + skills/list，Hermes 存 available_commands_update；Codex 未暴露 CLI 斜杠菜单，不虚构。DSH 只有已验证注册的 skill 会作为 prompt 提交，Host 命令走 commands/execute，失败保留草稿、成功显示返回文本。
 
@@ -225,7 +225,7 @@ Pi 内置命令不会使用 `prompt` 兜底：可映射的操作走原生 RPC，
 
 ### 6.2 本地图文队列
 
-队列面板使用精简分组视图，Steer 在前、Follow 在后，sent 回执不显示；无图片时不显示 0，非 pending 状态才追加短标记。`n/p` 按稳定 ID 跳过标题移动；`M-n/M-p` 同组调序，最后一条 steer 下移到 Follow 首位，第一条 follow 上移到 Steer 末尾，空组也支持转换；无 steer 能力时原子拒绝。跨组转换暂停发送，保持原条目的 ID、文本和图片引用，不自动下发。暂停键改为 `P`，`SPC` 切换自动发送，`?` 打开 transient 菜单，导航/调序/转换/暂停等 suffix 保持菜单，编辑/查看/所属聊天等退出菜单；`h` 查看完整说明，不常驻长篇页脚。隐藏的成功回执在容量紧张时自动清理，不让它们阻塞新条目。
+队列面板使用精简分组视图，pending 条目按 Steer 在前、Follow 在后计数，口径与 mode-line 的本地待发数一致；sending/accepted/failed/unknown 独立放到只读交接区，状态与原类型置于行首，sent 回执不显示；无图片时不显示 0，非 pending 状态才追加短标记。`n/p` 按稳定 ID 跳过标题移动；`M-n/M-p` 同组调序，最后一条 steer 下移到 Follow 首位，第一条 follow 上移到 Steer 末尾，空组也支持转换；无 steer 能力时原子拒绝。跨组转换暂停发送，保持原条目的 ID、文本和图片引用，不自动下发。暂停键改为 `P`，`SPC` 切换自动发送，`?` 打开 transient 菜单，导航/调序/转换/暂停等 suffix 保持菜单，编辑/查看/所属聊天等退出菜单；`h` 查看完整说明，不常驻长篇页脚。隐藏的成功回执在容量紧张时自动清理，不让它们阻塞新条目。
 
 `agent-dash-queue.el` 统一托管尚未下发的消息。每条具有独立 ID、kind、原始 text、经过发送过滤器的 wire-text、图片列表和状态；过滤器在入队/保存编辑时按所属会话展开一次。支持纯图或文本+图片，不拆成多条，不让显示装饰混入正文，不排队 slash 命令。既有后端队列只读展示，绝不使用 clear/rebuild 模拟编辑。
 

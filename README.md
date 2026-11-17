@@ -53,7 +53,7 @@ Unsent text-and-image messages use a unified local queue; backend-native queues 
 | `C-c C-r` | Resume a saved session |
 | `C-c C-b` | Switch to another chat |
 | `C-c @` | Pick a cross-agent session reference |
-| `/`, `@`, `@session`, `@dash` + `TAB` | Minibuffer completion (Vertico/Orderless) |
+| `/`, `@`, `@session` + `TAB` | Minibuffer completion (Vertico/Orderless) |
 | `C-u TAB` | Refresh the backend command catalog |
 | `i` outside the composer / `C-c C-i` anywhere | Focus the composer (inside it, `i` types normally) |
 | `M-p` / `M-n` | Browse sent prompts |
@@ -91,7 +91,7 @@ While running, `RET` / `C-c C-c` stages one follow-up containing the entire text
 | `D` | Confirm forgetting a read-only receipt; never retract a delivery |
 | `o` | Show the owner chat; explicitly reconnect before continuing a detached queue |
 
-The compact view groups **Steer before Follow** and hides sent receipts. Only nonzero image counts and exceptional states appear beside messages; common shortcuts stay visible in the header/footer, with full instructions under `?`. Moving the last steer down puts it first in Follow; moving the first follow up appends it to Steer. Crossing groups stages a conversion and pauses delivery, never injecting anything automatically.
+The compact view groups pending messages **Steer before Follow**, using the same local pending counts as the modeline. Handed-off, failed and unknown entries appear separately under **Deliveries · read-only**, with their status before the message; settled sent receipts remain hidden. Only nonzero image counts and exceptional states appear beside messages; common shortcuts stay visible in the header/footer, with full instructions under `?`. Moving the last steer down puts it first in Follow; moving the first follow up appends it to Steer. Crossing groups stages a conversion and pauses delivery, never injecting anything automatically.
 
 Editors are isolated from the live draft. `C-c C-c` saves text and images atomically; `C-c C-q` cancels. Image paste, file attachment, removal and preview reuse the chat bindings. An edited head entry holds later follow-ups behind it. Handed-off entries are immediately read-only; both acknowledgement and whole-run completion are required before the next local handoff. Errors, disconnects and manual cancellation pause delivery without retrying. Pi/Codex/DSH retain native steering semantics; Claude still interrupts then submits new input, and Hermes rejects steering.
 
@@ -110,8 +110,7 @@ Requests in the selected chat open automatically in the minibuffer, outside proc
 
 - `/` + `TAB`: shared client commands (`/help`, `/new`, `/resume`, `/dash`, `/stop`, `/quit`, plus `/model` where supported) and the backend's advertised commands/skills. Select a command, then `RET` to execute it. Client commands take no arguments and open their picker when applicable.
 - `@` + `TAB`: project files, or a session-reference picker. Paths containing spaces are quoted.
-- `@session` + `TAB`: saved sessions of the current agent, across projects.
-- `@dash` + `TAB`: sessions of all agents from the shared Hub inventory. Match agent, project, summary, latest prompt or id; selected references attach the saved conversation when sent.
+- `@session` + `TAB`: sessions across all agents and projects from the shared Hub inventory, using the Hub's default visibility rules. Live sessions show a green `●`. All columns remain visible; long fields are shortened, while full agent, date, project, summary, latest prompt and ID remain searchable and available on hover. Selected references attach the saved conversation when sent.
 
 Pickers use `completing-read`: existing Vertico is respected and optional Orderless is enabled locally without changing global settings. `C-g` preserves the draft; background output cannot shift the replacement region. Completion reads catalogs, not models. Pi merges its installed native catalog with `get_commands` (see below); Claude uses its initialization catalog; DSH uses Host commands and registered skills; Hermes uses ACP-advertised commands. Codex currently offers the shared client commands, not an emulation of its CLI-only slash menu. DSH Host command results are displayed; registered skills are submitted as prompts.
 

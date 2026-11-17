@@ -1205,6 +1205,45 @@ Reuse the existing tab, hub buffer and window.  q returns to the previous tab."
         (concat "…" (substring text (- (length text) max)))
       text)))
 
+(defun agent-dash-hub--reference-choices (rows)
+  "Return aligned completion choices for ROWS within the current window.
+Keep full metadata searchable without displaying it after the table columns."
+  (let* ((width (max 1 (- (window-body-width) 4)))
+         (agent-width (if (< width 40) 3 7))
+         (id-width (min 12 (max 4 (/ width 10))))
+         (date-width (if (< width 56) 10 17))
+         (project-width (min 20 (max 4 (/ width 6))))
+         (text-width (max 2 (- width agent-width id-width date-width project-width 10)))
+         (summary-width (max 1 (floor (* text-width 0.6)))))
+    (mapcar
+     (lambda (row)
+       (let* ((id (plist-get row :id))
+              (root (or (plist-get row :root) ""))
+              (agent (symbol-name (plist-get row :backend)))
+              (date (agent-dash-hub-time row))
+              (summary (agent-dash-hub--summary-text row))
+              (last (agent-dash-hub--last-text row))
+              (metadata (mapconcat (lambda (text) (agent-dash--one-line text 10000))
+                                   (list agent date root id summary last) " | "))
+              (label
+               (concat
+                (agent-dash-hub--column agent agent-width)
+                (if (agent-dash-hub-live-p row)
+                    (concat (propertize "●" 'face 'success) " ")
+                  "  ")
+                (agent-dash-hub--column id id-width) " "
+                (agent-dash-hub--column date date-width) " "
+                (agent-dash-hub--column
+                 (file-name-nondirectory (directory-file-name (if (equal root "") "—" root)))
+                 project-width)
+                " │ " (agent-dash-hub--column summary summary-width)
+                " │ " (agent-dash-hub--column last (- text-width summary-width)))))
+         (cons (concat (propertize (truncate-string-to-width label width nil nil "…")
+                                   'help-echo metadata)
+                       (propertize (concat " | " metadata) 'display ""))
+               row)))
+     rows)))
+
 (defun agent-dash-hub-read-reference (&optional backend query)
   "Read a reference, limited to BACKEND when non-nil, with initial QUERY.
 Use the shared inventory without generating summaries.  Full ids keep
@@ -1213,33 +1252,23 @@ otherwise identical labels distinct; all visible metadata is searchable."
     (unless (memq (plist-get (gethash source agent-dash-hub--sources) :status)
                   '(ok error))
       (agent-dash-hub--load source)))
-  (when (and (not (seq-some (lambda (row)
-                              (or (not backend) (eq backend (plist-get row :backend))))
-                            (agent-dash-hub--all)))
-             (seq-some (lambda (source)
-                         (eq (plist-get (gethash source agent-dash-hub--sources) :status) 'loading))
-                       (if backend (list backend) agent-dash-backends)))
-    (user-error "会话列表正在后台读取，请稍后重试引用"))
-  (let* ((rows (agent-dash-hub--newest-first
-                (seq-filter (lambda (row)
-                              (or (not backend) (eq backend (plist-get row :backend))))
-                            (agent-dash-hub--all))))
-         (choices
-          (mapcar (lambda (row)
-                    (cons (format "%s  %.12s  %s  %s | %s | %s | %s | %s"
-                                  (plist-get row :backend) (plist-get row :id)
-                                  (agent-dash-hub-time row)
-                                  (file-name-nondirectory
-                                   (directory-file-name (or (plist-get row :root) "—")))
-                                  (agent-dash--one-line (agent-dash-hub--summary-text row) 70)
-                                  (agent-dash--one-line (plist-get row :last) 70)
-                                  (or (plist-get row :root) "") (plist-get row :id))
-                          row)) rows))
-         (row (agent-dash-input-read "引用会话：" choices query)))
-    (format "@[%s](agent-dash:%s:%s)"
-            (replace-regexp-in-string
-             "[][\n]" " " (agent-dash--one-line (agent-dash-hub--summary-text row) 40))
-            (plist-get row :backend) (plist-get row :id))))
+  (let* ((agent-dash-hub--agent backend)
+         (agent-dash-hub--project nil)
+         (agent-dash-hub--live-only nil)
+         (agent-dash-hub--show-hidden nil)
+         (rows (agent-dash-hub--visible)))
+    (when (and (not rows)
+               (seq-some (lambda (source)
+                           (eq (plist-get (gethash source agent-dash-hub--sources) :status)
+                               'loading))
+                         (if backend (list backend) agent-dash-backends)))
+      (user-error "会话列表正在后台读取，请稍后重试引用"))
+    (let* ((choices (agent-dash-hub--reference-choices rows))
+           (row (agent-dash-input-read "引用会话：" choices query)))
+      (format "@[%s](agent-dash:%s:%s)"
+              (replace-regexp-in-string
+               "[][\n]" " " (agent-dash--one-line (agent-dash-hub--summary-text row) 40))
+              (plist-get row :backend) (plist-get row :id)))))
 
 (defun agent-dash-insert-reference ()
   "Insert a cross-agent session reference at point."

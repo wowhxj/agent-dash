@@ -15,6 +15,8 @@
   (declare (indent 0))
   `(let ((tabs (copy-tree (frame-parameter nil 'tabs)))
          (agent-dash--sessions nil)
+         (agent-dash-hub--lifecycle-pending (make-hash-table))
+         (agent-dash-hub--lifecycle-timer nil)
          (agent-dash-fake-calls nil))
      (save-window-excursion
        (unwind-protect
@@ -26,6 +28,8 @@
            (when (buffer-live-p (agent-dash-session-buffer session))
              (with-current-buffer (agent-dash-session-buffer session)
                (let ((agent-dash--quitting t)) (kill-buffer)))))
+         (when (timerp agent-dash-hub--lifecycle-timer)
+           (cancel-timer agent-dash-hub--lifecycle-timer))
          (set-frame-parameter nil 'tabs tabs)))))
 
 (ert-deftest agent-dash-tab-test-hub-reuses-tab-and-buffer ()
@@ -257,6 +261,62 @@
            (should (eq (window-buffer chat-window)
                        (agent-dash-session-buffer session))))
        (when-let* ((queue (get-buffer queue-name))) (kill-buffer queue))))))
+
+(ert-deftest agent-dash-tab-test-queue-editor-save-and-cancel-close-windows ()
+  "Finishing an editor removes its window; declining discard changes nothing."
+  (dolist (save '(nil t))
+    (agent-dash-tab-test-with-tabs
+     (cl-letf (((symbol-function 'agent-dash-queue--schedule) #'ignore))
+       (let* ((session (agent-dash-open 'fake temporary-file-directory))
+              (entry (agent-dash-queue-add session "original" nil))
+              (queue (agent-dash-queue session))
+              (editor (agent-dash-queue--edit session (plist-get entry :id)))
+              (window (selected-window))
+              (frames (frame-list)))
+         (unwind-protect
+             (progn
+               (should (= (length (window-list)) 3))
+               (agent-dash--set-input "edited")
+               (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+                 (agent-dash-queue-edit-cancel))
+               (should (buffer-live-p editor))
+               (should (window-live-p window))
+               (should (= (length (window-list)) 3))
+               (should (equal (agent-dash--input) "edited"))
+               (if save
+                   (agent-dash-queue-edit-save)
+                 (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+                   (agent-dash-queue-edit-cancel)))
+               (should-not (buffer-live-p editor))
+               (should-not (window-live-p window))
+               (should (= (length (window-list)) 2))
+               (should (equal (plist-get entry :text) (if save "edited" "original")))
+               (should-not (plist-get entry :editor))
+               (should (get-buffer-window (agent-dash-session-buffer session)))
+               (select-window (get-buffer-window queue))
+               (call-interactively (key-binding "q"))
+               (should (= (length (window-list)) 1))
+               (should (eq (window-buffer) (agent-dash-session-buffer session)))
+               (should (equal frames (frame-list))))
+           (when (buffer-live-p editor)
+             (with-current-buffer editor
+               (let ((agent-dash-queue--saved t)) (kill-buffer))))
+           (when (buffer-live-p queue) (kill-buffer queue))))))))
+
+(ert-deftest agent-dash-tab-test-queue-q-closes-window-with-previous-buffers ()
+  "Closing a queue removes its pane even after its window acquired history."
+  (agent-dash-tab-test-with-tabs
+   (let* ((session (agent-dash-open 'fake temporary-file-directory))
+          (queue (agent-dash-queue session))
+          (window (selected-window)))
+     (unwind-protect
+         (progn
+           (set-window-prev-buffers window (list (list (get-buffer-create "*scratch*") 1 1)))
+           (call-interactively (key-binding "q"))
+           (should-not (window-live-p window))
+           (should (= (length (window-list)) 1))
+           (should (eq (window-buffer) (agent-dash-session-buffer session))))
+       (kill-buffer queue)))))
 
 (ert-deftest agent-dash-tab-test-split-direction-follows-pixel-shape ()
   "Use physical aspect ratio, not incomparable character columns and lines."

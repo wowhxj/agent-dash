@@ -55,6 +55,10 @@ Other chats keep their requests visible until selected or answered with
   "Marker where the next timeline item goes; advances on insertion.")
 (defvar-local agent-dash--input-start nil "Marker at the composer start.")
 (defvar-local agent-dash--input-overlay nil "Overlay decorating the composer.")
+(defvar-local agent-dash--input-heading-overlay nil
+  "Overlay adding shortcut hints to the protected composer heading.")
+(defconst agent-dash--composer-separator "\n── 输入消息 ──\n"
+  "Read-only heading on a separate physical line above the editable draft.")
 (defvar-local agent-dash--attachment-overlay nil
   "Overlay showing staged images on the separator before the composer.")
 (defvar-local agent-dash--spinner-index 0 "Current activity animation frame.")
@@ -555,13 +559,32 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
       (setq agent-dash--session session
             default-directory (agent-dash-session-root session))
       (let ((inhibit-read-only t))
-        (insert (propertize "\n" 'read-only t 'rear-nonsticky t)))
+        (insert (propertize agent-dash--composer-separator
+                            'face 'agent-dash-separator-face
+                            'read-only t 'front-sticky '(read-only) 'rear-nonsticky t)))
       (setq agent-dash--transcript-end (copy-marker (point-min) t)
             agent-dash--input-start (copy-marker (point-max)))
       (agent-dash--decorate-input))
     (setf (agent-dash-session-buffer session) buffer)
     (push session agent-dash--sessions)
     buffer))
+
+(defun agent-dash--resize-input-hints (_window)
+  "Fit composer shortcut hints to the narrowest window showing this chat."
+  (when (and (overlayp agent-dash--input-heading-overlay)
+             (overlay-buffer agent-dash--input-heading-overlay))
+    (let* ((windows (get-buffer-window-list (current-buffer) nil t))
+           (width (if windows (apply #'min (mapcar #'window-body-width windows))
+                    (window-body-width)))
+           (heading (buffer-substring-no-properties
+                     (overlay-start agent-dash--input-heading-overlay)
+                     (overlay-end agent-dash--input-heading-overlay)))
+           (hint (seq-find
+                  (lambda (text) (<= (+ (string-width heading) (string-width text)) width))
+                  '("  RET 发送 · Shift-RET 换行 · TAB 补全 / 和 @"
+                    "  RET 发送 · TAB 补全" ""))))
+      (overlay-put agent-dash--input-heading-overlay 'after-string
+                   (propertize hint 'face 'shadow)))))
 
 (defun agent-dash--decorate-input ()
   "Decorate the composer without changing its text or prompt history."
@@ -580,14 +603,19 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (setq agent-dash--attachment-overlay
           (make-overlay (1- agent-dash--input-start) agent-dash--input-start
                         nil t nil))
-    (overlay-put agent-dash--attachment-overlay 'before-string previews))
-  (overlay-put agent-dash--input-overlay 'before-string
-               (propertize "You> " 'face 'agent-dash-input-face))
-  ;; Empty composers have a zero-length overlay: :extend alone cannot
-  ;; paint the area after the virtual prompt.  Fill to the window edge
-  ;; with display-only space, never padding the draft with real text.
-  ;; Anchor the cursor at the start of that space, not after the fill
-  ;; (or before the virtual prompt when the composer is empty).
+    (overlay-put agent-dash--attachment-overlay 'before-string (concat "\n" previews)))
+  (when (overlayp agent-dash--input-heading-overlay)
+    (delete-overlay agent-dash--input-heading-overlay))
+  (setq agent-dash--input-heading-overlay nil)
+  ;; Queue editors already have their own header and no separator text.
+  (when (> (- agent-dash--input-start agent-dash--transcript-end) 2)
+    (setq agent-dash--input-heading-overlay
+          (make-overlay (1+ agent-dash--transcript-end) (1- agent-dash--input-start)))
+    (agent-dash--resize-input-hints nil)
+    (add-hook 'window-size-change-functions #'agent-dash--resize-input-hints nil t))
+  ;; Keep the editable start free of before-strings, including IME preedit.
+  ;; Fill empty composers to the window edge without padding the draft.
+  ;; Anchor the cursor before the display-only fill, not after it.
   (overlay-put agent-dash--input-overlay 'after-string
                (propertize " " 'face 'agent-dash-input-face 'cursor t
                            'display '(space :align-to right))))
@@ -610,7 +638,9 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
         (plist-put item key nil))
       (plist-put item :process-group nil))
     (erase-buffer)
-    (insert (propertize "\n" 'read-only t 'rear-nonsticky t))
+    (insert (propertize agent-dash--composer-separator
+                        'face 'agent-dash-separator-face
+                        'read-only t 'front-sticky '(read-only) 'rear-nonsticky t))
     (setq agent-dash--transcript-end (copy-marker (point-min) t)
           agent-dash--input-start (copy-marker (point-max)))
     (setq-local tab-line-format '(:eval (agent-dash--header)))

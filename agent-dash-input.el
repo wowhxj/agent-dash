@@ -58,7 +58,7 @@ Orderless, when installed, is enabled only for this picker."
               :start (+ begin (1- (match-beginning 1)))
               :end (save-excursion (skip-chars-forward "^ \t\n") (point))))
        ((string-match
-         "\\(?:\\`\\|[ \t\n]\\)@\\(session\\|dash\\)\\(?:[ \t]+\\([^@\n]*\\)\\)?\\'"
+         "\\(?:\\`\\|[ \t\n]\\)@\\(session\\)\\(?:[ \t]+\\([^@\n]*\\)\\)?\\'"
          head)
         (list :kind (intern (match-string 1 head))
               :query (or (match-string 2 head) "")
@@ -125,7 +125,7 @@ Pi uses its native catalog without adding client-only slash names."
                    (agent-dash-data session :command-catalog))))))
 
 (defun agent-dash-complete-input (&optional refresh)
-  "Complete /, @file, @session or @dash through the minibuffer.
+  "Complete /, @file or cross-agent @session through the minibuffer.
 With prefix argument REFRESH, reload the backend command catalog."
   (interactive "P")
   (let* ((context (or (agent-dash-input-context)
@@ -149,25 +149,31 @@ With prefix argument REFRESH, reload the backend command catalog."
                                                 (agent-dash--one-line (cdr entry) 100))
                                         (car entry)))
                                 (agent-dash-input--commands session refresh)) query)))
-                 ((or 'session 'dash)
+                 ('session
                   (require 'agent-dash-hub)
-                  (agent-dash-hub-read-reference
-                   (and (eq kind 'session) (agent-dash-session-backend session)) query))
+                  (agent-dash-hub-read-reference nil query))
                  ('file
-                  (let ((file (agent-dash-input-read
-                               "Reference: "
-                               (append '(("session — current agent's sessions" . session)
-                                         ("dash — all agents' sessions" . dash))
-                                       (agent-dash-input--files
-                                        (agent-dash-session-root session))) query)))
-                    (if (memq file '(session dash))
+                  (let ((file (if (or (file-name-absolute-p query)
+                                      (string-prefix-p "./" query)
+                                      (string-prefix-p "../" query))
+                                  (let ((insert-default-directory nil))
+                                    (minibuffer-with-setup-hook
+                                        (lambda () (goto-char (point-max)))
+                                      (read-file-name "Reference: "
+                                                      (agent-dash-session-root session)
+                                                      nil t query)))
+                                (agent-dash-input-read
+                                 "Reference: "
+                                 (append '(("session — all agents' sessions" . session))
+                                         (agent-dash-input--files
+                                          (agent-dash-session-root session))) query))))
+                    (if (eq file 'session)
                         (progn
                           (require 'agent-dash-hub)
-                          (agent-dash-hub-read-reference
-                           (and (eq file 'session) (agent-dash-session-backend session))))
+                          (agent-dash-hub-read-reference))
                       (concat "@" (if (string-match-p "[ \t\n\"]" file)
                                       (prin1-to-string file)
-                                    (if (member file '("session" "dash"))
+                                    (if (equal file "session")
                                         (concat "./" file) file)))))))))
           (unless (buffer-live-p origin) (user-error "Chat was closed"))
           (with-current-buffer origin
@@ -205,7 +211,7 @@ Native commands return nil and are dispatched through the backend protocol."
                (dolist (entry entries)
                  (princ (format "/%s — %s\n" (car entry) (cdr entry))))
                (princ "\nTAB: minibuffer completion. C-u TAB: refresh commands.\n")
-               (princ "@file: project files; @session: this agent; @dash: all agents.\n"))))
+               (princ "@file: project files; @session: sessions across all agents.\n"))))
           ("new" (agent-dash-open backend (agent-dash-session-root session)))
           ("resume" (agent-dash-resume backend (agent-dash-session-root session)))
           ("dash" (require 'agent-dash-hub) (agent-dash-hub))

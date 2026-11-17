@@ -177,11 +177,41 @@
            (with-current-buffer editor
              (let ((agent-dash-queue--saved t)) (kill-buffer)))))))))
 
+(ert-deftest agent-dash-queue-test-editor-renders-existing-images ()
+  "Opening a multimodal entry immediately renders its existing attachments."
+  (agent-dash-queue-test-with-chat
+   (cl-letf (((symbol-function 'agent-dash-capability) (lambda (&rest _) t))
+             ((symbol-function 'display-images-p) #'always)
+             ((symbol-function 'create-image)
+              (lambda (&rest _) '(image :type png :data "fixture"))))
+     (let* ((entry (agent-dash-queue-add session "photo" (list agent-dash-queue-test-image)))
+            (editor (save-window-excursion
+                      (agent-dash-queue--edit session (plist-get entry :id)))))
+       (unwind-protect
+           (with-current-buffer editor
+             (should (eq (key-binding (kbd "C-c C-k")) #'agent-dash-queue-edit-cancel))
+             (should-not (key-binding (kbd "C-c C-q")))
+             (should (string-search "C-c C-k cancel" header-line-format))
+             (should (equal (agent-dash--input) "photo"))
+             (should (= (char-before agent-dash--input-start) ?\n))
+             (let* ((preview (overlay-get agent-dash--attachment-overlay 'before-string))
+                    (start (string-search "[image:" preview)))
+               (should start)
+               (should (equal (get-text-property start 'agent-dash-image preview)
+                              agent-dash-queue-test-image))
+               (should (equal (get-text-property start 'display preview)
+                              '(image :type png :data "fixture")))))
+         (when (buffer-live-p editor)
+           (with-current-buffer editor
+             (let ((agent-dash-queue--saved t)) (kill-buffer)))))))))
+
 (ert-deftest agent-dash-queue-test-editor-image-commands-save-and-cancel ()
   "Real attachment commands edit only the isolated payload until saved."
   (agent-dash-queue-test-with-chat
    (cl-letf (((symbol-function 'agent-dash-capability) (lambda (_s _key) t)))
-     (let ((file (make-temp-file "dash-queue-image-" nil ".png")))
+     ;; Keep native trampoline compilation out of the mocked system opener.
+     (let ((native-comp-enable-subr-trampolines nil)
+           (file (make-temp-file "dash-queue-image-" nil ".png")))
        (unwind-protect
            (progn
              (with-temp-buffer
@@ -203,7 +233,8 @@
                          (unwind-protect
                              (cl-letf (((symbol-function 'completing-read)
                                         (lambda (_prompt choices &rest _) (caar choices)))
-                                       ((symbol-function 'executable-find) (lambda (_) "/usr/bin/open"))
+                                       ((symbol-function 'executable-find)
+                                        (lambda (_) "/usr/bin/open"))
                                        ((symbol-function 'run-at-time) #'ignore)
                                        ((symbol-function 'call-process)
                                         (lambda (program _in _out _display image-file)
@@ -211,7 +242,8 @@
                                           (setq opened image-file)
                                           (should (equal (agent-dash-image-bytes
                                                           (agent-dash-image-from-file image-file))
-                                                         (agent-dash-image-bytes agent-dash-queue-test-image)))
+                                                         (agent-dash-image-bytes
+                                                          agent-dash-queue-test-image)))
                                           0)))
                                (call-interactively (key-binding (kbd "C-c C-o"))))
                            (when opened (delete-file opened))))
@@ -230,7 +262,7 @@
                        (if save
                            (call-interactively (key-binding (kbd "C-c C-c")))
                          (cl-letf (((symbol-function 'yes-or-no-p) #'always))
-                           (call-interactively (key-binding (kbd "C-c C-q")))))
+                           (call-interactively (key-binding (kbd "C-c C-k")))))
                        (should (equal (plist-get (car (plist-get entry :images)) :name)
                                       (if save (file-name-nondirectory file) "fixture.png")))
                        (should-not agent-dash-fake-calls))
@@ -395,6 +427,8 @@
            (setq editor (agent-dash-queue-copy))))
        (with-current-buffer editor
          (should (equal (agent-dash--input) "recover me"))
+         (should (string-search "fixture.png"
+                                (overlay-get agent-dash--attachment-overlay 'before-string)))
          (should (equal agent-dash--attachments (list agent-dash-queue-test-image)))
          (agent-dash-queue-edit-save))
        (should (eq (plist-get entry :status) 'unknown))
@@ -455,6 +489,60 @@
      (agent-dash-queue--pump session)
      (should (= (length (cl-remove-if-not (lambda (call) (eq (car call) 'send))
                                           agent-dash-fake-calls)) 1)))))
+
+(ert-deftest agent-dash-queue-test-accepted-delivery-is-not-a-pending-follow ()
+  "A handed-off entry must not look like an editable pending queue item."
+  (agent-dash-queue-test-with-chat
+   (let* ((text (concat (make-string 160 ?中) " long message"))
+          (entry (agent-dash-queue-add session text nil)))
+     (agent-dash-queue--pump session)
+     (agent-dash-emit session '(:type run :state running))
+     (should (eq (plist-get entry :status) 'accepted))
+     (should-not (agent-dash-queue-pending session))
+     (should-not (string-search "[S" (agent-dash--mode-line)))
+     (with-temp-buffer
+       (agent-dash-queue-mode)
+       (setq agent-dash-queue--owner session)
+       (agent-dash-queue--render)
+       (should (string-search "Steer (0)" (buffer-string)))
+       (should (string-search "Follow (0)" (buffer-string)))
+       (should (string-search "Deliveries · read-only (1)" (buffer-string)))
+       (should (string-search "No local pending messages" (buffer-string)))
+       (should (equal (tabulated-list-get-id) (plist-get entry :id)))
+       (should (string-prefix-p "[accepted · Follow]" (aref (tabulated-list-get-entry) 0)))
+       (let ((message (condition-case err (agent-dash-queue-edit)
+                        (user-error (error-message-string err)))))
+         (should (string-search "read-only" message))
+         (should (string-search "RET" message)))
+       (should (equal (plist-get entry :text) text))
+       (agent-dash-emit session '(:type run :state idle))
+       (should (eq (plist-get entry :status) 'sent))
+       (should-not (string-search "Deliveries" (buffer-string)))
+       (should-not (tabulated-list-get-id)))
+     (agent-dash-queue--pump session)
+     (should (= (length agent-dash-fake-calls) 1)))))
+
+(ert-deftest agent-dash-queue-test-only-pending-items-count-in-steer-follow ()
+  "Receipt counts are separate and their states stay visible before long text."
+  (agent-dash-queue-test-with-chat
+   (dolist (state '(sending accepted failed unknown sent))
+     (let ((entry (agent-dash-queue-add session (make-string 160 ?a) nil)))
+       (plist-put entry :status state)))
+   (agent-dash-queue-add session "pending follow" nil)
+   (agent-dash-queue-add session "pending steer" nil 'steer)
+   (with-temp-buffer
+     (agent-dash-queue-mode)
+     (setq agent-dash-queue--owner session)
+     (agent-dash-queue--render)
+     (should (string-search "Steer (1)" (buffer-string)))
+     (should (string-search "Follow (1)" (buffer-string)))
+     (should (string-search "Deliveries · read-only (4)" (buffer-string)))
+     (should (= (length tabulated-list-entries) 6))
+     (dolist (state '(sending accepted failed unknown))
+       (should (seq-some
+                (lambda (row)
+                  (string-prefix-p (format "[%s · Follow]" state) (aref (nth 1 row) 0)))
+                tabulated-list-entries))))))
 
 (ert-deftest agent-dash-queue-test-compact-groups-hide-sent-and-navigation-skips-headings ()
   (agent-dash-queue-test-with-chat

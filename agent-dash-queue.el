@@ -58,7 +58,9 @@
   "Return editable entry ID from SESSION, or signal a user error."
   (let ((entry (agent-dash-queue-entry session id)))
     (unless (eq (plist-get entry :status) 'pending)
-      (user-error "Only unsent local entries can be changed"))
+      (user-error (concat "Delivery is read-only (%s), not pending. "
+                          "RET: view; c: copy failed/unknown to a new draft")
+                  (plist-get entry :status)))
     (when (buffer-live-p (plist-get entry :editor))
       (user-error "Finish or cancel this entry's editor first"))
     entry))
@@ -317,6 +319,24 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
   (agent-dash-queue--touch session))
 
 ;;;; Queue view and isolated multimodal editor
+(defun agent-dash-queue--close-view (&optional kill)
+  "Close this view's windows in the current frame, optionally KILL its buffer.
+Do not close anything if killing is declined, and never delete the last window."
+  (let* ((buffer (current-buffer))
+         (windows (get-buffer-window-list buffer nil (selected-frame))))
+    (when (or (not kill) (kill-buffer buffer))
+      (dolist (window windows)
+        (when (window-live-p window)
+          (if (one-window-p t)
+              (unless kill (quit-window nil window))
+            (delete-window window))))
+      (when (and (not kill) (buffer-live-p buffer)) (bury-buffer buffer)))))
+
+(defun agent-dash-queue-quit ()
+  "Close the queue window without deleting queued messages."
+  (interactive)
+  (agent-dash-queue--close-view))
+
 (defvar agent-dash-queue-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
@@ -333,6 +353,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
                        ("o" . agent-dash-queue-chat) ("g" . agent-dash-queue--render)))
       (define-key map (kbd (car binding)) (cdr binding)))
     map))
+(define-key agent-dash-queue-mode-map (kbd "q") #'agent-dash-queue-quit)
 (define-derived-mode agent-dash-queue-mode tabulated-list-mode "Agent Queue"
   "Manage unsent local messages, separately from read-only deliveries."
   (setq tabulated-list-format [("Message" 0 nil)]
@@ -364,7 +385,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (agent-dash-queue--render))
     (agent-dash-pop-to-buffer buffer)))
 (defun agent-dash-queue--render ()
-  "Render compact Steer/Follow groups, retaining the selected stable ID."
+  "Render pending Steer/Follow groups and separate read-only deliveries."
   (interactive)
   (let* ((session agent-dash-queue--owner)
          (id (tabulated-list-get-id))
@@ -380,24 +401,36 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
                       "Memory only: closing the chat pauses delivery; Emacs exit discards it."))
     (erase-buffer)
     (setq tabulated-list-entries nil)
-    (dolist (kind '(steer follow-up))
-      (let ((group (cl-remove-if-not (lambda (e) (eq (plist-get e :kind) kind)) entries)))
-        (insert (propertize (format "%s (%d)\n"
-                                    (if (eq kind 'steer) "Steer" "Follow") (length group))
-                            'face 'bold 'agent-dash-queue-heading kind))
-        (dolist (entry group)
-          (let* ((status (plist-get entry :status))
-                 (images (or (plist-get entry :image-count) (length (plist-get entry :images))))
-                 (summary (replace-regexp-in-string "[\n\r\t]+" " " (plist-get entry :text)))
-                 (row (vector
-                       (concat (truncate-string-to-width summary 100 nil nil "…")
-                               (when (> images 0) (format "  [%d image%s]" images
-                                                          (if (= images 1) "" "s")))
-                               (cond ((buffer-live-p (plist-get entry :editor)) "  [editing]")
-                                     ((not (eq status 'pending)) (format "  [%s]" status)))))))
-            (push (list (plist-get entry :id) row) tabulated-list-entries)
-            (tabulated-list-print-entry (plist-get entry :id) row)))
-        (insert "\n")))
+    (dolist (kind '(steer follow-up deliveries))
+      (let ((group (if (eq kind 'deliveries)
+                       (cl-remove-if (lambda (e) (eq (plist-get e :status) 'pending)) entries)
+                     (agent-dash-queue-pending session kind))))
+        (when (and (eq kind 'deliveries) (not (agent-dash-queue-pending session)))
+          (insert (propertize "No local pending messages.\n\n" 'face 'shadow)))
+        (when (or group (not (eq kind 'deliveries)))
+          (insert (propertize
+                   (format "%s (%d)\n"
+                           (pcase kind
+                             ('steer "Steer") ('follow-up "Follow")
+                             (_ "Deliveries · read-only"))
+                           (length group))
+                   'face 'bold 'agent-dash-queue-heading kind))
+          (dolist (entry group)
+            (let* ((status (plist-get entry :status))
+                   (images (or (plist-get entry :image-count) (length (plist-get entry :images))))
+                   (summary (replace-regexp-in-string "[\n\r\t]+" " " (plist-get entry :text)))
+                   (row (vector
+                         (concat (if (eq status 'pending)
+                                     (when (buffer-live-p (plist-get entry :editor)) "[editing] ")
+                                   (format "[%s · %s] " status
+                                           (if (eq (plist-get entry :kind) 'steer)
+                                               "Steer" "Follow")))
+                                 (truncate-string-to-width summary 100 nil nil "…")
+                                 (when (> images 0) (format "  [%d image%s]" images
+                                                            (if (= images 1) "" "s")))))))
+              (push (list (plist-get entry :id) row) tabulated-list-entries)
+              (tabulated-list-print-entry (plist-get entry :id) row)))
+          (insert "\n"))))
     (setq tabulated-list-entries (nreverse tabulated-list-entries))
     (when (or (plist-get native :steering) (plist-get native :follow-up))
       (insert (propertize "Backend · read-only\n" 'face 'shadow))
@@ -569,7 +602,6 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
     (set-keymap-parent map text-mode-map)
     (define-key map (kbd "C-c ?") #'agent-dash-queue-edit-help)
     (define-key map (kbd "C-c C-c") #'agent-dash-queue-edit-save)
-    (define-key map (kbd "C-c C-q") #'agent-dash-queue-edit-cancel)
     (define-key map (kbd "C-y") #'agent-dash-paste)
     (define-key map (kbd "s-v") #'agent-dash-paste-image)
     (define-key map (kbd "C-c C-v") #'agent-dash-paste-image)
@@ -577,6 +609,8 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
     (define-key map (kbd "C-c C-d") #'agent-dash-remove-image)
     (define-key map (kbd "C-c C-o") #'agent-dash-open-image-external)
     map))
+(define-key agent-dash-queue-edit-mode-map (kbd "C-c C-q") nil)
+(define-key agent-dash-queue-edit-mode-map (kbd "C-c C-k") #'agent-dash-queue-edit-cancel)
 (transient-define-prefix agent-dash-queue-edit-help ()
   "Edit a queued message's text and images without sending it."
   ["Queue message editor · changes apply only on save"
@@ -587,12 +621,12 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
     ("o" "系统图片程序打开 (C-c C-o)" agent-dash-open-image-external :transient t)]
    ["编辑结果"
     ("s" "保存文字和图片 (C-c C-c)" agent-dash-queue-edit-save)
-    ("q" "取消，不改原消息 (C-c C-q)" agent-dash-queue-edit-cancel)]])
+    ("q" "取消，不改原消息 (C-c C-k)" agent-dash-queue-edit-cancel)]])
 
 (defconst agent-dash-queue--editor-header
   (concat "Queue editor · C-c C-f add image · C-c C-d remove image"
           " · s-v paste image · C-c C-o open externally"
-          " · C-c C-c save · C-c C-q cancel · C-c ? help")
+          " · C-c C-c save · C-c C-k cancel · C-c ? help")
   "Attachment and save controls for an isolated queue editor.")
 
 (define-derived-mode agent-dash-queue-edit-mode agent-dash-mode "Queue Edit"
@@ -619,6 +653,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (with-current-buffer buffer
         (setq agent-dash--attachments (copy-tree (plist-get entry :images)))
         (agent-dash--set-input (plist-get entry :text))
+        (agent-dash--decorate-input)
         (setq header-line-format
               (concat "Recovered NEW draft · may already have executed · "
                       agent-dash-queue--editor-header)))
@@ -644,10 +679,12 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
       (setq-local agent-dash-queue--entry-id id)
       (setq-local header-line-format agent-dash-queue--editor-header)
       (setq-local mode-line-format '(" Queue edit (not sent)"))
-      (setq-local agent-dash--input-start (copy-marker (point-min)))
+      (insert (propertize "\n" 'read-only t 'rear-nonsticky t))
+      (setq-local agent-dash--input-start (copy-marker (point-max)))
       (setq-local agent-dash--transcript-end (copy-marker (point-min)))
       (setq-local agent-dash--attachments (copy-tree (plist-get entry :images)))
       (agent-dash--set-input (or (plist-get entry :text) ""))
+      (agent-dash--decorate-input)
       (add-hook 'kill-buffer-hook #'agent-dash-queue--editor-killed nil t)
       (add-hook 'change-major-mode-hook #'agent-dash-queue--editor-mode-change nil t)
       (add-hook 'kill-buffer-query-functions #'agent-dash-queue--editor-query nil t)
@@ -688,10 +725,10 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
           (agent-dash--plist-merge entry payload))
       (agent-dash-queue-add session text agent-dash--attachments 'follow-up))
     (setq agent-dash-queue--saved t)
-    (kill-buffer)))
+    (agent-dash-queue--close-view t)))
 (defun agent-dash-queue-edit-cancel ()
   "Close this isolated editor, preserving the original queue message."
-  (interactive) (kill-buffer))
+  (interactive) (agent-dash-queue--close-view t))
 
 (add-hook 'agent-dash-event-functions #'agent-dash-queue--event)
 (provide 'agent-dash-queue)

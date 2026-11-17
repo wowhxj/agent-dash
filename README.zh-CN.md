@@ -53,7 +53,7 @@ DSH 新建会话默认使用 `auto` 权限；恢复已有会话时保留原权�
 | `C-c C-r` | 恢复历史会话 |
 | `C-c C-b` | 切换到其他聊天 |
 | `C-c @` | 打开跨 Agent 会话引用选择器 |
-| `/`、`@`、`@session`、`@dash` + `TAB` | 在 minibuffer 中筛选补全（Vertico/Orderless） |
+| `/`、`@`、`@session` + `TAB` | 在 minibuffer 中筛选补全（Vertico/Orderless） |
 | `C-u TAB` | 刷新后端命令目录 |
 | 非输入区按 `i` / 任意位置 `C-c C-i` | 回到输入区末尾（输入区内 `i` 仍正常输入） |
 | `M-p` / `M-n` | 浏览已发送的输入 |
@@ -91,7 +91,7 @@ macOS 的 `terminal-notifier` 可通过 `brew install terminal-notifier` 安装�
 | `D` | 确认后清理只读回执；不撤回后端消息 |
 | `o` | 回到所属聊天；断线后先显式重连，再按 `r` 继续 |
 
-队列只显示待处理项，按 **Steer → Follow** 分组，隐藏 sent；图片只显示数量，没有图片时不显示 0。常用快捷键显示在顶部和底部，长篇说明不占据正文，按 `?` 查看完整帮助。`M-n` 将最后一条 steer 移到 Follow 首位，`M-p` 将第一条 follow 移到 Steer 末尾；跨组只暂存转换并暂停发送，不自动注入模型。
+待发送消息按 **Steer → Follow** 分组，计数与 modeline 的本地 pending 口径一致；交接中、已接收、失败和未知状态的记录独立显示在 **Deliveries · read-only** 区，状态置于行首，已完成的 sent 回执隐藏；图片只显示数量，没有图片时不显示 0。常用快捷键显示在顶部和底部，长篇说明不占据正文，按 `?` 查看完整帮助。`M-n` 将最后一条 steer 移到 Follow 首位，`M-p` 将第一条 follow 移到 Steer 末尾；跨组只暂存转换并暂停发送，不自动注入模型。
 
 编辑器与聊天草稿隔离，`C-c C-c` 原子保存文本和图片，`C-c C-q` 取消；图片粘贴、文件添加、移除和预览沿用聊天快捷键。正在编辑的队首不会被自动发送，后面的 follow 也不会越过它。下发后立即变为只读，必须收到关联确认及整轮结束才释放当前交接；失败、连接中断或主动取消会暂停队列，不自动重发。Pi/Codex/DSH 保留其原生 steer 语义，Claude 仍是 interrupt 后提交新输入，Hermes 不支持 steer，转换会明确拒绝。
 
@@ -110,8 +110,7 @@ macOS 的 `terminal-notifier` 可通过 `brew install terminal-notifier` 安装�
 
 - `/` + `TAB`：共用客户端命令（`/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`，支持时还有 `/model`）加后端实际公布的命令/skill。选中后按 `RET` 执行；客户端命令不接收参数，需要选择时打开对应 picker。
 - `@` + `TAB`：补全项目文件，或转到会话引用选择器；含空格的路径会加引号。
-- `@session` + `TAB`：当前 Agent 的历史会话，跨项目。
-- `@dash` + `TAB`：Hub 中全部 Agent 的会话，可按 Agent、项目、摘要、末句和 ID 多词筛选。发送时沿用已有引用展开逻辑附上对话。
+- `@session` + `TAB`：统一跨 Agent、跨项目引用，复用 Hub 默认可见规则。live 会话显示绿色 `●`；单行保留所有列，长字段省略，但完整 Agent、日期、项目、摘要、末句和 ID 仍可多词搜索及悬停查看。发送时沿用已有引用展开逻辑附上对话。
 
 选择器统一走 `completing-read`，沿用当前 Vertico，安装了 Orderless 时仅在 picker 内启用，不修改全局设置。`C-g` 保留草稿；后台输出不会导致替换位置偏移。补全只读目录，不调用模型。Pi 合并本机内置目录与 `get_commands`（见下节）；Claude 读取初始化目录；DSH 读取 Host 命令与注册 skill；Hermes 使用 ACP 公布的命令。Codex 目前提供共用客户端命令，不冒充其 CLI 专有斜杠菜单。DSH Host 命令会展示执行结果，已验证注册的 skill 则作为 prompt 提交。
 
