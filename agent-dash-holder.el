@@ -104,7 +104,11 @@ is written after the log reader has drained the agent's output.")
             (unless (string-empty-p line)
               ;; One bad record must not drop the rest of the chunk.
               (condition-case err
-                  (funcall on-record session (agent-dash-json-read line))
+                  (let ((record (agent-dash-json-read line)))
+                    (unwind-protect
+                        (funcall on-record session record)
+                      (when (equal (agent-dash-jget record "type") "agent_dash_exit")
+                        (agent-dash-holder-detach session))))
                 (error
                  (agent-dash-emit session
                                   (list :type 'notice :level 'error
@@ -152,10 +156,12 @@ Read the whole log when FROM-START, else only records written from now."
     (when (process-live-p writer) (process-send-eof writer))))
 
 (defun agent-dash-holder-stop (session)
-  "Terminate SESSION's agent and detach."
+  "Terminate SESSION's agent, following output until its final exit record.
+Unlike an ordinary detach, a stop must deliver the backend's exit event so
+observers such as the Hub can retire its live status.  The record reader
+detaches the tail and writer after `agent_dash_exit'."
   (when-let* ((pid (agent-dash-holder-pid (agent-dash-data session :holder))))
-    (signal-process pid 'TERM))
-  (agent-dash-holder-detach session))
+    (signal-process pid 'TERM)))
 
 (defun agent-dash-holder-log (session object)
   "Append OBJECT as a record to SESSION's holder log.
@@ -171,7 +177,8 @@ so a later attach replays them in order."
   "Record backend session id SID for SESSION and in its holder directory."
   (agent-dash-set-data session :sid sid)
   (write-region sid nil (agent-dash-holder--file (agent-dash-data session :holder) "sid")
-                nil 'silent))
+                nil 'silent)
+  (run-hook-with-args 'agent-dash-session-change-functions session))
 
 (defun agent-dash-holder-find (backend sid)
   "Return the directory of the live holder of BACKEND session SID, or nil."

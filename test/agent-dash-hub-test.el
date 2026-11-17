@@ -75,6 +75,8 @@
           (agent-dash-fake-calls nil)
           (agent-dash-fake-saved (agent-dash-hub-test-saved))
           (agent-dash-hub--sources (make-hash-table))
+          (agent-dash-hub--lifecycle-pending (make-hash-table))
+          (agent-dash-hub--lifecycle-timer nil)
           (agent-dash-summary-cache-file (make-temp-file "agent-dash-summaries"))
           (agent-dash-summary--cache (make-hash-table :test #'equal))
           (agent-dash-summary--sessions (make-hash-table :test #'equal))
@@ -94,6 +96,8 @@
                                                         'loading))
                                         agent-dash-backends))))
              (with-current-buffer "*agent-dash hub*" ,@body))
+         (when (timerp agent-dash-hub--lifecycle-timer)
+           (cancel-timer agent-dash-hub--lifecycle-timer))
          (kill-buffer "*agent-dash hub*")
          (delete-directory agent-dash-hub-test-alpha)
          (delete-directory agent-dash-hub-test-beta)
@@ -117,6 +121,172 @@
           (push (plist-get row :id) ids))
         (forward-line 1)))
     (nreverse ids)))
+
+(ert-deftest agent-dash-hub-test-exited-chat-is-not-live ()
+  (let* ((session (agent-dash-session-create 'fake temporary-file-directory))
+         (buffer (generate-new-buffer " *hub-dead-chat*"))
+         (agent-dash--sessions (list session)))
+    (unwind-protect
+        (progn
+          (agent-dash-set-data session :sid "closed")
+          (setf (agent-dash-session-buffer session) buffer
+                (agent-dash-session-state session) 'dead)
+          (should-not (agent-dash-hub-live-p '(:backend fake :id "closed"))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-dash-hub-test-process-exit-refreshes-live-status ()
+  (agent-dash-hub-test-with-hub
+   (let* ((session (agent-dash-session-create 'fake agent-dash-hub-test-beta))
+          (buffer (generate-new-buffer " *hub-exiting-chat*"))
+          (agent-dash--sessions (list session)))
+     (unwind-protect
+         (progn
+           (agent-dash-set-data session :sid "s2-bbbbbbbb")
+           (setf (agent-dash-session-buffer session) buffer)
+           (should (agent-dash-hub-live-p
+                    (seq-find (lambda (row) (equal (plist-get row :id) "s2-bbbbbbbb"))
+                              (agent-dash-hub--all))))
+           ;; A source snapshot must stay separate from the cached hub rows.
+           (setq agent-dash-fake-saved (copy-tree agent-dash-fake-saved))
+           (plist-put (nth 1 agent-dash-fake-saved) :running nil)
+           (agent-dash-emit session '(:type run :state dead))
+           (sleep-for 0.15)
+           (let ((row (seq-find (lambda (row) (equal (plist-get row :id) "s2-bbbbbbbb"))
+                                (agent-dash-hub--all))))
+             (should-not (agent-dash-hub-live-p row))))
+       (kill-buffer buffer)))))
+
+(ert-deftest agent-dash-hub-test-detach-refreshes-without-marking-process-dead ()
+  (agent-dash-hub-test-with-hub
+   (let* ((agent-dash--sessions nil)
+          (session (agent-dash-session-create 'fake agent-dash-hub-test-beta))
+          (buffer (agent-dash--setup-buffer session)))
+     (agent-dash-set-data session :sid "s2-bbbbbbbb")
+     (kill-buffer buffer)
+     (sleep-for 0.1)
+     (should (member '(detach) agent-dash-fake-calls))
+     (should (agent-dash-hub-live-p
+              (seq-find (lambda (row) (equal (plist-get row :id) "s2-bbbbbbbb"))
+                        (agent-dash-hub--all)))))))
+
+(ert-deftest agent-dash-hub-test-lifecycle-refresh-coalesces-and-skips-turn-churn ()
+  (agent-dash-hub-test-with-hub
+   (let ((session (agent-dash-session-create 'fake agent-dash-hub-test-alpha))
+         (calls 0))
+     (cl-letf (((symbol-function 'agent-dash-history-request)
+                (lambda (backend operation &optional callback id)
+                  (should (eq backend 'fake))
+                  (cl-incf calls)
+                  (agent-dash-fake-history-request backend operation callback id))))
+       (run-hook-with-args 'agent-dash-session-change-functions session)
+       (run-hook-with-args 'agent-dash-session-change-functions session)
+       (agent-dash-emit session '(:type run :state running))
+       (agent-dash-emit session '(:type run :state idle))
+       (sleep-for 0.1)
+       (should (= calls 1))
+       (agent-dash-emit session '(:type run :state running))
+       (agent-dash-emit session '(:type run :state idle))
+       (sleep-for 0.1)
+       (should (= calls 1))
+       (agent-dash-emit session '(:type run :state dead))
+       (sleep-for 0.1)
+       (should (= calls 2))))))
+
+(ert-deftest agent-dash-hub-test-inflight-snapshot-gets-one-fresh-followup ()
+  (agent-dash-hub-test-with-hub
+   (let ((agent-dash-history--jobs (make-hash-table :test #'equal))
+         (session (agent-dash-session-create 'fake agent-dash-hub-test-beta))
+         (calls 0) old-callback)
+     (puthash '(fake sessions nil) 'existing-worker agent-dash-history--jobs)
+     (cl-letf (((symbol-function 'agent-dash-history-request)
+                (lambda (backend operation &optional callback id)
+                  (cl-incf calls)
+                  (if (= calls 1) (setq old-callback callback)
+                    (agent-dash-fake-history-request backend operation callback id)))))
+       (run-hook-with-args 'agent-dash-session-change-functions session)
+       (sleep-for 0.1)
+       (should (eq (gethash 'fake agent-dash-hub--lifecycle-pending) 'waiting))
+       (run-hook-with-args 'agent-dash-session-change-functions session)
+       (sleep-for 0.1)
+       (should (= calls 1))
+       (setq agent-dash-fake-saved (copy-tree agent-dash-fake-saved))
+       (plist-put (nth 1 agent-dash-fake-saved) :running nil)
+       (remhash '(fake sessions nil) agent-dash-history--jobs)
+       ;; The shared pre-exit snapshot is stale; only the next scan is current.
+       (funcall old-callback '(:ok t))
+       (should (= calls 2))
+       (should-not (gethash 'fake agent-dash-hub--lifecycle-pending))
+       (should-not (plist-get (nth 1 (plist-get (gethash 'fake agent-dash-hub--sources)
+                                                :rows)) :running))))))
+
+(ert-deftest agent-dash-hub-test-quit-reduces-two-real-holders-to-one-live ()
+  (agent-dash-test-with-holders
+    (agent-dash-hub-test-with-hub
+     (let* ((agent-dash--sessions nil)
+            (first (agent-dash-session-create 'fake agent-dash-hub-test-alpha))
+            (second (agent-dash-session-create 'fake agent-dash-hub-test-beta))
+            (first-buffer (agent-dash--setup-buffer first))
+            (second-buffer (agent-dash--setup-buffer second)))
+       (unwind-protect
+           (progn
+             (cl-loop for session in (list first second)
+                      for id in '("s1-aaaaaaaa" "s2-bbbbbbbb")
+                      do (let ((dir (agent-dash-holder-dir 'fake id)))
+                           (agent-dash-set-data session :sid id)
+                           (agent-dash-holder-start dir temporary-file-directory '("cat"))
+                           (agent-dash-holder-attach
+                            session dir
+                            (lambda (s record)
+                              (when (equal (agent-dash-jget record "type") "agent_dash_exit")
+                                (agent-dash-emit s '(:type run :state dead)))))))
+             (cl-letf (((symbol-function 'agent-dash-history-request)
+                        (lambda (backend operation &optional callback id)
+                          (setq agent-dash-fake-saved
+                                (mapcar
+                                 (lambda (row)
+                                   (plist-put (copy-sequence row) :running
+                                              (and (agent-dash-holder-alive-p
+                                                    (agent-dash-holder-dir 'fake (plist-get row :id)))
+                                                   t)))
+                                 agent-dash-fake-saved))
+                          (agent-dash-fake-history-request backend operation callback id)))
+                       ((symbol-function 'agent-dash-backend-quit)
+                        (lambda (_backend s) (agent-dash-holder-stop s)))
+                       ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+               (agent-dash-hub-refresh)
+               (setq agent-dash-hub--live-only t)
+               (agent-dash-hub--redisplay)
+               (should (= 2 (length (agent-dash-hub-test-ids))))
+               (agent-dash-hub--goto "fake:s1-aaaaaaaa")
+               (with-current-buffer second-buffer (agent-dash-quit))
+               (should-not (buffer-live-p second-buffer))
+               (agent-dash-test-wait
+                (lambda ()
+                  (and (eq (agent-dash-session-state second) 'dead)
+                       (not (plist-get
+                             (seq-find (lambda (row) (equal (plist-get row :id) "s2-bbbbbbbb"))
+                                       (agent-dash-hub--all)) :running)))))
+               (should (equal (agent-dash-hub-test-ids) '("s1-aaaaaaaa")))
+               (should (equal (get-text-property (point) 'agent-dash-key) "fake:s1-aaaaaaaa"))
+               (should (agent-dash-holder-alive-p (agent-dash-data first :holder)))
+               (should-not (process-live-p (agent-dash-data second :tail)))))
+         (dolist (session (list first second)) (agent-dash-holder-detach session))
+         (dolist (buffer (list first-buffer second-buffer))
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (let ((agent-dash--quitting t)) (kill-buffer buffer))))))))))
+
+(ert-deftest agent-dash-hub-test-no-inventory-work-without-hub ()
+  (let ((agent-dash-hub--lifecycle-pending (make-hash-table))
+        (agent-dash-hub--lifecycle-timer nil)
+        (session (agent-dash-session-create 'fake temporary-file-directory)))
+    (cl-letf (((symbol-function 'agent-dash-hub--open-p) (lambda () nil))
+              ((symbol-function 'agent-dash-history-request)
+               (lambda (&rest _) (ert-fail "Unopened Hub launched a scan"))))
+      (run-hook-with-args 'agent-dash-session-change-functions session)
+      (agent-dash-emit session '(:type run :state dead))
+      (should-not agent-dash-hub--lifecycle-timer)
+      (should (= 0 (hash-table-count agent-dash-hub--lifecycle-pending))))))
 
 (ert-deftest agent-dash-hub-test-groups-columns-and-errors ()
   (agent-dash-hub-test-with-hub

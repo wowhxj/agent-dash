@@ -87,7 +87,8 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
   "Return the live chat session of BACKEND session ID, or nil."
   (seq-find (lambda (s) (and (eq (agent-dash-session-backend s) backend)
                              (equal (agent-dash-data s :sid) id)
-                             (buffer-live-p (agent-dash-session-buffer s))))
+                             (buffer-live-p (agent-dash-session-buffer s))
+                             (not (eq (agent-dash-session-state s) 'dead))))
             agent-dash--sessions))
 
 (defun agent-dash-hub-live-p (row)
@@ -149,6 +150,62 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
                               :status 'loading)
            agent-dash-hub--sources)
   (agent-dash-history-request backend 'sessions callback))
+
+(defvar agent-dash-hub--lifecycle-pending (make-hash-table)
+  "Backends awaiting a lifecycle refresh: `queued' or `waiting' on an old worker.")
+(defvar agent-dash-hub--lifecycle-timer nil
+  "One-shot timer merging chat and process lifecycle changes.")
+
+(defun agent-dash-hub--open-p ()
+  "Whether any Hub buffer exists, including a currently hidden one."
+  (seq-some (lambda (buffer)
+              (with-current-buffer buffer (derived-mode-p 'agent-dash-hub-mode)))
+            (buffer-list)))
+
+(defun agent-dash-hub--refresh-changed ()
+  "Refresh affected sources, after any pre-change worker has finished."
+  (setq agent-dash-hub--lifecycle-timer nil)
+  (let (backends)
+    (maphash (lambda (backend state) (when (eq state 'queued) (push backend backends)))
+             agent-dash-hub--lifecycle-pending)
+    (dolist (backend backends)
+      (cond
+       ((not (agent-dash-hub--open-p))
+        (remhash backend agent-dash-hub--lifecycle-pending))
+       ((gethash (list backend 'sessions nil) agent-dash-history--jobs)
+        ;; Sharing the current reader alone could republish its pre-exit live
+        ;; flags.  Coalesce all intervening changes into one fresh follow-up.
+        (puthash backend 'waiting agent-dash-hub--lifecycle-pending)
+        (agent-dash-history-request
+         backend 'sessions
+         (lambda (_result)
+           (remhash backend agent-dash-hub--lifecycle-pending)
+           (when (agent-dash-hub--open-p) (agent-dash-hub--load backend)))))
+       (t
+        (remhash backend agent-dash-hub--lifecycle-pending)
+        (agent-dash-hub--load backend))))))
+
+(defun agent-dash-hub--session-changed (session)
+  "Debounce a source refresh after SESSION opens, closes or gets its native ID."
+  (when (agent-dash-hub--open-p)
+    (let ((backend (agent-dash-session-backend session)))
+      (unless (gethash backend agent-dash-hub--lifecycle-pending)
+        (puthash backend 'queued agent-dash-hub--lifecycle-pending)
+        (unless (timerp agent-dash-hub--lifecycle-timer)
+          (setq agent-dash-hub--lifecycle-timer
+                (run-at-time 0.05 nil #'agent-dash-hub--refresh-changed)))))))
+
+(defun agent-dash-hub--session-event (session event)
+  "Refresh on SESSION's live/dead EVENT transitions, not each streamed event."
+  (when (and (eq (plist-get event :type) 'run)
+             (memq (plist-get event :state) '(idle running dead)))
+    (let ((state (if (eq (plist-get event :state) 'dead) 'down 'up)))
+      (unless (eq state (agent-dash-data session :hub-live-state))
+        (agent-dash-set-data session :hub-live-state state)
+        (agent-dash-hub--session-changed session)))))
+
+(add-hook 'agent-dash-session-change-functions #'agent-dash-hub--session-changed)
+(add-hook 'agent-dash-event-functions #'agent-dash-hub--session-event)
 
 (defun agent-dash-hub--first-text (row)
   "Return ROW's first prompt, labelled title, or a placeholder."

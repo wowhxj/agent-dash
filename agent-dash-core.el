@@ -31,6 +31,11 @@
 (defvar agent-dash-event-functions nil
   "Abnormal hook receiving (SESSION EVENT), including lifecycle-only events.")
 
+(defvar agent-dash-session-change-functions nil
+  "Functions called with SESSION when a chat opens, closes, or gets its native ID.
+Closing a chat may detach from a still-running agent; this hook is not an
+exit notification.  Observe `agent-dash-event-functions' for process exits.")
+
 (defvar agent-dash-update-functions nil
   "Abnormal hook run as (SESSION ITEM) after an event changed ITEM.
 ITEM is nil when only session-level state (run, queue, meta) changed.")
@@ -385,17 +390,17 @@ find an early match without reading small files twice."
                    (agent-dash--plist-merge (agent-dash-session-meta session)
                                             (cddr event))))
       ('request
-        (setf (agent-dash-session-requests session)
-              (append (cl-remove (plist-get event :id)
-                                 (agent-dash-session-requests session)
-                                 :key (lambda (r) (plist-get r :id))
-                                 :test #'equal)
-                      (list event)))
-        ;; Keep dialogs outside folded tool output, with a separate ID space.
-        (let ((dialog (copy-sequence event)))
-          (setq dialog (plist-put dialog :id (cons 'request (plist-get event :id)))
-                dialog (plist-put dialog :status 'pending)
-                item (agent-dash--upsert session dialog))))
+       (setf (agent-dash-session-requests session)
+             (append (cl-remove (plist-get event :id)
+                                (agent-dash-session-requests session)
+                                :key (lambda (r) (plist-get r :id))
+                                :test #'equal)
+                     (list event)))
+       ;; Keep dialogs outside folded tool output, with a separate ID space.
+       (let ((dialog (copy-sequence event)))
+         (setq dialog (plist-put dialog :id (cons 'request (plist-get event :id)))
+               dialog (plist-put dialog :status 'pending)
+               item (agent-dash--upsert session dialog))))
       ('request-done
        (setf (agent-dash-session-requests session)
              (cl-remove (plist-get event :id)

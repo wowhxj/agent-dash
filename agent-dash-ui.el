@@ -638,7 +638,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (setq agent-dash--sessions (delq s agent-dash--sessions))
     (force-mode-line-update t)
     (unless agent-dash--quitting
-      (agent-dash-backend-detach (agent-dash-session-backend s) s)))
+      (agent-dash-backend-detach (agent-dash-session-backend s) s))
+    (run-hook-with-args 'agent-dash-session-change-functions s))
   (dolist (window (get-buffer-window-list (current-buffer) nil (selected-frame)))
     (if (one-window-p t)
         (when-let* ((hub (get-buffer "*agent-dash hub*")))
@@ -657,6 +658,7 @@ Return the session."
          (let ((agent-dash--quitting t)) (kill-buffer)))
        (signal (car err) (cdr err))))
     (agent-dash-backend-start backend session resume-id)
+    (run-hook-with-args 'agent-dash-session-change-functions session)
     (goto-char (point-max))
     session))
 
