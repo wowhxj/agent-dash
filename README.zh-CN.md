@@ -62,7 +62,9 @@ DSH 新建会话默认使用 `auto` 权限；恢复已有会话时保留原权�
 
 ### 完成提醒
 
-默认启用自适应提醒：正在选中的聊天且 Emacs 有焦点时不打扰；在 Emacs 的其他 buffer 工作时通过 echo area 提示；切到其他应用时发送系统通知。macOS 使用 Emacs 内置 AppleScript 接口，其他平台使用内置 `notifications`（需要可用的 D-Bus 通知服务）。系统通知发送报错时回退到 echo area；系统权限或勿扰模式仍可能屏蔽通知，发送接口无法确认用户是否实际看见。
+默认启用自适应提醒：正在选中的聊天且 Emacs 有焦点时不打扰；在 Emacs 的其他 buffer 工作时通过 echo area 提示；切到其他应用时发送系统通知。桌面通知先加载内置 `notifications`，再优先调用用户配置的 `notify-send`，兼容 `use-package notifications :commands notify-send :config ...` 的延迟加载。macOS 可沿用个人配置中通过 `terminal-notifier` 发送的封装；其他平台可将 `notify-send` 别名到 `notifications-notify`。agent-dash 不重定义用户函数，也不再自行调用 AppleScript。未配置 `notify-send` 时回退到内置 `notifications-notify`（需要可用的 D-Bus 通知服务；macOS 用户需配置封装）。
+
+macOS 的 `terminal-notifier` 可通过 `brew install terminal-notifier` 安装，并须在 Emacs 的 `exec-path` 中可见。通知的 `-group Emacs`、`-activate org.gnu.Emacs` 等行为由个人 `notify-send` 封装控制。发送时同步报错或返回 nil，会回退到 echo area；异步封装返回进程只表示启动成功，不检测后续进程退出状态。系统权限或勿扰模式仍可能屏蔽通知，发送接口无法确认用户是否实际看见。
 
 提醒仅包含 Agent、项目目录名、短会话 ID，以及 `Run ended` / `Run failed`，不包含对话正文；“本轮结束”不代表整个任务成功完成。历史回放、重连快照、主动取消和断线不发完成提醒；自动 follow-up 连续执行时合并到暂时结束后再提醒。Emacs 内已有 minibuffer 交互时延迟 echo area 提示，不抢占输入；切到其他应用后不因此延迟系统通知。只监控当前 Emacs 中已连接的聊天，关闭聊天或退出 Emacs 后不继续通知。
 

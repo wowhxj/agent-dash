@@ -13,7 +13,6 @@
 (defvar agent-dash--sessions nil)
 
 (declare-function agent-dash--backend-name "agent-dash-ui" (backend))
-(declare-function ns-do-applescript "ext:nsfns.m" (script))
 (declare-function notifications-notify "notifications" (&rest params))
 
 (defcustom agent-dash-notify t
@@ -120,15 +119,13 @@ only the backend, project and short session ID, never conversation text."
                        'local-map agent-dash-notify--completed-map)))))))
 
 (defun agent-dash-notify--desktop (title body)
-  "Send desktop notification TITLE and BODY, or signal a delivery error."
-  (if (and (eq system-type 'darwin) (fboundp 'ns-do-applescript))
-      (ns-do-applescript
-       (format "display notification %s with title %s"
-               (prin1-to-string body) (prin1-to-string title)))
-    (require 'notifications)
-    (unless (notifications-notify :title title :body body :app-name "agent-dash"
-                                  :app-icon nil :urgency 'normal)
-      (error "Desktop notification unavailable"))))
+  "Send TITLE and BODY via user `notify-send', or built-in notifications."
+  ;; Load deferred notifications configuration before choosing its wrapper.
+  (require 'notifications)
+  (unless (funcall (if (fboundp 'notify-send) 'notify-send #'notifications-notify)
+                   :title title :body body :app-name "agent-dash"
+                   :app-icon nil :urgency 'normal)
+    (error "Desktop notification unavailable")))
 
 (defun agent-dash-notify--waiting-p (session)
   "Whether SESSION has outstanding delivery or automatic follow-ups."
