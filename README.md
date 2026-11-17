@@ -149,6 +149,7 @@ The dedicated tab reflows into a balanced grid when windows are added or removed
 | `N` | New session: pick `C`/`x`/`p`/`d`/`m` (Claude/Codex/pi/dsh/Hermes), then a directory |
 | `i` | Details: metadata and the whole conversation |
 | `n` / `p`, `TAB` | Move; fold a group |
+| `C-c C-n` / `C-c C-p` | Next / previous project heading (project grouping only; includes folded projects) |
 | `j` | Jump to a session by any of its text |
 | `f` | View menu: project, agent, live only, hidden sessions, grouping |
 | `a` / `P` / `l` / `t` / `c` | Agent filter / project filter / live only / newest first vs. groups / reset |

@@ -473,6 +473,25 @@ Keep old rows usable while loading.  Repeated requests share active workers."
   (interactive "p")
   (agent-dash-hub-next-entry (- (or count 1))))
 
+(defun agent-dash-hub-next-project (&optional count)
+  "Move COUNT project headers forward, including folded projects.
+With a negative COUNT, move backward.  Stop at the list boundaries."
+  (interactive "p")
+  (unless (eq agent-dash-hub--grouping 'project)
+    (user-error "请先按 t 切换到项目分组视图"))
+  (let ((step (if (< (or count 1) 0) -1 1)))
+    (dotimes (_ (abs (or count 1)))
+      (let ((origin (point)) found)
+        (while (and (not found) (zerop (forward-line step)))
+          (when (get-text-property (point) 'agent-dash-group)
+            (setq found t)))
+        (unless found (goto-char origin))))))
+
+(defun agent-dash-hub-previous-project (&optional count)
+  "Move COUNT project headers backward, including folded projects."
+  (interactive "p")
+  (agent-dash-hub-next-project (- (or count 1))))
+
 (defun agent-dash-hub-toggle-group ()
   "Fold or unfold the group at point."
   (interactive)
@@ -1034,6 +1053,8 @@ whole original conversation."
    ["浏览"
     ("n" "下一条" agent-dash-hub-next-entry :transient t)
     ("p" "上一条" agent-dash-hub-previous-entry :transient t)
+    ("C-c C-n" "下一项目" agent-dash-hub-next-project :transient t)
+    ("C-c C-p" "上一项目" agent-dash-hub-previous-project :transient t)
     ("j" "定位会话" agent-dash-hub-search-all)
     ("s" "语义搜索 / 问答" agent-dash-search-menu)
     ("TAB" "折叠 / 展开" agent-dash-hub-toggle-group :transient t)
@@ -1067,6 +1088,8 @@ whole original conversation."
                      ("a" . agent-dash-hub-filter-agent) ("l" . agent-dash-hub-toggle-live)
                      ("t" . agent-dash-hub-sort-by-time) ("c" . agent-dash-hub-clear-filters)
                      ("n" . agent-dash-hub-next-entry) ("p" . agent-dash-hub-previous-entry)
+                     ("C-c C-n" . agent-dash-hub-next-project)
+                     ("C-c C-p" . agent-dash-hub-previous-project)
                      ("TAB" . agent-dash-hub-toggle-group) ("g" . agent-dash-hub-refresh)
                      ("i" . agent-dash-hub-details)
                      ("d" . agent-dash-hub-mark-delete) ("u" . agent-dash-hub-unmark-delete)

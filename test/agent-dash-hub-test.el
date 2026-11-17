@@ -11,6 +11,42 @@
 (require 'agent-dash)
 (require 'agent-dash-fake)
 
+(ert-deftest agent-dash-hub-project-navigation ()
+  "Project jumps skip session rows and include folded headers."
+  (with-temp-buffer
+    (insert "Hub\n"
+            (propertize "Alpha\n" 'agent-dash-group "Alpha")
+            "session one\nsession two\n"
+            (propertize "Beta (folded)\n" 'agent-dash-group "Beta")
+            (propertize "Gamma\n" 'agent-dash-group "Gamma")
+            "session three\n")
+    (let ((agent-dash-hub--grouping 'project))
+      (goto-char (point-min))
+      (agent-dash-hub-next-project)
+      (should (equal (get-text-property (point) 'agent-dash-group) "Alpha"))
+      (forward-line 1)
+      (agent-dash-hub-next-project)
+      (should (equal (get-text-property (point) 'agent-dash-group) "Beta"))
+      (agent-dash-hub-next-project)
+      (should (equal (get-text-property (point) 'agent-dash-group) "Gamma"))
+      (let ((origin (point)))
+        (agent-dash-hub-next-project)
+        (should (= (point) origin)))
+      (agent-dash-hub-previous-project 2)
+      (should (equal (get-text-property (point) 'agent-dash-group) "Alpha"))
+      (let ((origin (point)))
+        (agent-dash-hub-previous-project)
+        (should (= (point) origin)))
+      (agent-dash-hub-previous-project -1)
+      (should (equal (get-text-property (point) 'agent-dash-group) "Beta")))
+    (dolist (grouping '(nil agent))
+      (let ((agent-dash-hub--grouping grouping))
+        (should-error (agent-dash-hub-next-project) :type 'user-error)))
+    (should (eq (lookup-key agent-dash-hub-mode-map (kbd "C-c C-n"))
+                #'agent-dash-hub-next-project))
+    (should (eq (lookup-key agent-dash-hub-mode-map (kbd "C-c C-p"))
+                #'agent-dash-hub-previous-project))))
+
 (defvar gptel-model 'test-model "Stand-in until gptel is loaded.")
 (defvar gptel-backend nil "Stand-in until gptel is loaded.")
 
