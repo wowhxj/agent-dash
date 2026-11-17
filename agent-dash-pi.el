@@ -30,6 +30,8 @@
   "Directory where Pi saves sessions."
   :type 'directory)
 
+(declare-function agent-dash-queue-managed-p "agent-dash-queue")
+
 (add-to-list 'agent-dash-backends 'pi t)
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql pi)))
@@ -203,6 +205,11 @@
                           :level (intern (or (agent-dash-jget record "notifyType") "info"))
                           :text (ansi-color-filter-apply message))))))
       ((and "setStatus" (guard (equal (agent-dash-jget record "statusKey")
+                                      "agent-dash-fast-mode")))
+       (agent-dash-emit session
+                        (list :type 'meta :fast-mode
+                              (equal (agent-dash-jget record "statusText") "enabled"))))
+      ((and "setStatus" (guard (equal (agent-dash-jget record "statusKey")
                                       "agent-dash-fast")))
        (let ((tier (agent-dash-jget record "statusText")))
          (agent-dash-emit session
@@ -369,6 +376,101 @@ Keep pre-compaction messages, but never replay abandoned branches."
        (agent-dash-pi--load-history session t))
       (t (agent-dash-emit session (list :type 'notice :level 'error :text error)))))))
 
+(defun agent-dash-pi--start-command (sid &optional file)
+  "Build the Pi command for SID, resuming saved FILE when supplied."
+  (append (list (or (executable-find agent-dash-pi-executable)
+                    (user-error "Cannot find `%s'" agent-dash-pi-executable))
+                "--mode" "rpc" "--extension" agent-dash-pi-bridge-file)
+          (if file (list "--session" file) (list "--session-id" sid))
+          agent-dash-pi-arguments))
+
+(defun agent-dash-pi--attach (session dir)
+  "Attach SESSION to its Pi holder DIR and refresh its saved branch."
+  (agent-dash-holder-attach session dir #'agent-dash-pi--record)
+  (agent-dash-pi--request session '(:type "get_state")
+                          (apply-partially #'agent-dash-pi--on-state session))
+  (agent-dash-pi--load-history session))
+
+(defun agent-dash-pi-reload (session)
+  "Confirm restarting Pi, then resume SESSION's saved file without inference.
+Keep the same session object and chat buffer, including its input draft.
+Never kill a busy/unsaved session or launch before the old holder has exited."
+  (unless (eq (agent-dash-session-state session) 'idle)
+    (user-error "Wait for Pi to become idle before /reload"))
+  (when (or (agent-dash-data session :pi-native-pending)
+            (agent-dash-session-requests session)
+            (and (fboundp 'agent-dash-queue-managed-p)
+                 (agent-dash-queue-managed-p session)))
+    (user-error "Finish pending commands and queued messages before /reload"))
+  (when (seq-some (lambda (arg)
+                    (member arg '("--session" "--session-id" "--no-session"
+                                  "--continue" "--resume" "-c" "-r")))
+                  agent-dash-pi-arguments)
+    (user-error "Remove session-selection flags from agent-dash-pi-arguments before /reload"))
+  (let* ((state (agent-dash-pi--native-query session '(:type "get_state")))
+         (sid (agent-dash-jget state "sessionId"))
+         (file (agent-dash-jget state "sessionFile"))
+         (dir (agent-dash-data session :holder))
+         (pid (and dir (agent-dash-holder-pid dir))))
+    (when (or (agent-dash-jget state "isStreaming")
+              (agent-dash-jget state "isCompacting")
+              (> (or (agent-dash-jget state "pendingMessageCount") 0) 0))
+      (user-error "Pi is busy; /reload did not stop it"))
+    (unless (and (stringp sid) (equal sid (agent-dash-data session :sid))
+                 (stringp file) (file-readable-p file))
+      (user-error "Pi session is not saved/readable; /reload did not stop it"))
+    (unless (and pid (agent-dash-holder-alive-p dir))
+      (user-error "Pi is not running; resume the saved session instead"))
+    ;; Resolve everything that can fail before terminating the current process.
+    (let ((command (append (agent-dash-pi--start-command sid file)
+                           (when (agent-dash-jget state "model" "provider")
+                             (list "--provider" (agent-dash-jget state "model" "provider")
+                                   "--model" (agent-dash-jget state "model" "id")))
+                           (when (agent-dash-jget state "thinkingLevel")
+                             (list "--thinking" (agent-dash-jget state "thinkingLevel"))))))
+      (when (yes-or-no-p "Restart Pi and resume this saved session, keeping the draft? ")
+        (let ((latest (agent-dash-pi--native-query session '(:type "get_state"))))
+          (unless (and (eq (agent-dash-session-state session) 'idle)
+                       (equal pid (agent-dash-holder-pid dir))
+                       (equal sid (agent-dash-jget latest "sessionId"))
+                       (equal file (agent-dash-jget latest "sessionFile"))
+                       (equal (agent-dash-jget state "model" "provider")
+                              (agent-dash-jget latest "model" "provider"))
+                       (equal (agent-dash-jget state "model" "id")
+                              (agent-dash-jget latest "model" "id"))
+                       (equal (agent-dash-jget state "thinkingLevel")
+                              (agent-dash-jget latest "thinkingLevel"))
+                       (not (agent-dash-session-requests session))
+                       (not (and (fboundp 'agent-dash-queue-managed-p)
+                                 (agent-dash-queue-managed-p session)))
+                       (file-readable-p file)
+                       (not (agent-dash-jget latest "isStreaming"))
+                       (not (agent-dash-jget latest "isCompacting"))
+                       (= (or (agent-dash-jget latest "pendingMessageCount") 0) 0))
+            (user-error "Pi changed while confirming; /reload did not stop it")))
+        (unless (eq 0 (signal-process pid 'TERM))
+          (user-error "Could not stop Pi; /reload did not start another process"))
+        ;; Keep the tail attached until the holder's final exit record is read:
+        ;; a dead agent PID alone doesn't mean its log relay has drained yet.
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (or (agent-dash-holder-alive-p dir)
+                          (not (eq (agent-dash-session-state session) 'dead)))
+                      (< (float-time) deadline))
+            (accept-process-output nil 0.05)))
+        (unless (and (not (agent-dash-holder-alive-p dir))
+                     (eq (agent-dash-session-state session) 'dead))
+          (user-error "Pi has not fully exited; /reload did not start another process"))
+        (agent-dash-holder-detach session)
+        (dolist (key '(:tail :writer :callbacks)) (agent-dash-set-data session key nil))
+        (agent-dash-pi-native-reset session)
+        (agent-dash-emit session '(:type meta :fast-mode nil :service-tier nil))
+        (agent-dash-holder-start dir (agent-dash-session-root session) command)
+        (agent-dash-emit session '(:type run :state idle))
+        (agent-dash-pi--attach session dir)
+        (agent-dash-emit
+         session '(:type notice :level info
+                         :text "Pi restarted from the same saved session; draft kept."))))))
+
 (cl-defmethod agent-dash-backend-start ((_ (eql pi)) session &optional resume-id)
   "Pi `agent-dash-backend-start' for SESSION and RESUME-ID."
   (let* ((sid (or resume-id (agent-dash-uuid)))
@@ -377,20 +479,11 @@ Keep pre-compaction messages, but never replay abandoned branches."
     (unless (agent-dash-holder-alive-p dir)
       (agent-dash-holder-start
        dir (agent-dash-session-root session)
-       (append (list (or (executable-find agent-dash-pi-executable)
-                         (user-error "Cannot find `%s'" agent-dash-pi-executable))
-                     "--mode" "rpc" "--extension" agent-dash-pi-bridge-file)
-               (if resume-id
-                   (list "--session"
-                         (or (agent-dash-pi--file resume-id)
-                             (user-error "No saved Pi session %s" resume-id)))
-                 (list "--session-id" sid))
-               agent-dash-pi-arguments)))
-    ;; RPC has no session header: ask for state and the complete active branch.
-    (agent-dash-holder-attach session dir #'agent-dash-pi--record)
-    (agent-dash-pi--request session '(:type "get_state")
-                            (apply-partially #'agent-dash-pi--on-state session))
-    (agent-dash-pi--load-history session)))
+       (agent-dash-pi--start-command
+        sid (when resume-id
+              (or (agent-dash-pi--file resume-id)
+                  (user-error "No saved Pi session %s" resume-id))))))
+    (agent-dash-pi--attach session dir)))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql pi)) session text images mode)
   "Pi `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
@@ -401,7 +494,10 @@ Keep pre-compaction messages, but never replay abandoned branches."
         (when images (user-error "Remove images before running Pi commands"))
         (agent-dash-backend-command 'pi session text mode))
     (let ((token (agent-dash-data session :image-draft-token))
-          (queue-id (agent-dash-data session :queue-sending)))
+          (queue-id (agent-dash-data session :queue-sending))
+          (fast-command
+           (when (string-match "\\`/\\(fast\\(?::[0-9]+\\)?\\)\\(?:[[:space:]]\\|\\'\\)" text)
+             (match-string 1 text))))
       (agent-dash-pi--request
        session
        (append (list :type "prompt" :message text)
@@ -415,6 +511,13 @@ Keep pre-compaction messages, but never replay abandoned branches."
                  ('steer '(:streamingBehavior "steer"))))
        (lambda (ok _data error)
          (agent-dash-delivery-result session queue-id ok)
+         (when (and ok fast-command)
+           ;; Stock RPC ignores this unsolicited UI response.  Only our bridge
+           ;; reads it, and validates the command's source before reading state.
+           (agent-dash-holder-write
+            session (list :type "extension_ui_response"
+                          :id (concat "agent-dash-fast-refresh:" (agent-dash-uuid))
+                          :value fast-command)))
          (unless ok
            (if (and images (not queue-id)) (agent-dash-image-send-failed session token error)
              (agent-dash-emit session (list :type 'notice :level 'error

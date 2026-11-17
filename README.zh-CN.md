@@ -121,7 +121,9 @@ Pi 补全采用自身的内置命令（当前验证版本共 24 个）加 RPC �
 
 `/login [provider-id]`、`/logout [provider-id]` 通过正在运行的 Pi runtime 处理，包含扩展注册的 provider。安装时须将 `agent-dash-pi-bridge.mjs` 与 Elisp 文件一并保留。可选择 provider 和认证方式；所有认证自由文本输入都走 `read-passwd` 遮罩，包括旧 OAuth 接口的 API-key 提示和地址字段。不要在 `/login` 后附加密钥；认证命令不进入输入历史或模型上下文。`C-g` 取消对话，失败不自动重试；授权链接仅显示，不自动打开浏览器或覆盖剪贴板。
 
-**旧 Pi 后台进程需先 `/quit` 停止，再从 Hub 恢复以加载桥接；仅关闭聊天 buffer 会复用旧进程。** 不会自动重启正在执行的任务。桥接缺失、未知命令均明确拒绝，不回退到模型。`/settings`、`/tree`、`/fork`、`/clone`、`/trust`、`/share`、`/reload` 等终端 UI 专用命令会标记并提示限制，不把“目录一致”冒充“完整实现了终端界面”；`/hotkeys` 显示当前 Emacs 键位。
+加载更新后的 Elisp 后，`/reload` 会先确认，再**重启 Pi 并恢复同一个已保存会话**，不是 Pi 原生热重载。保留聊天 buffer、未发送草稿、模型及思考等级；会话未保存或不可读、任务执行中、有待处理对话或排队消息时拒绝重启，旧进程退出超时也不会启动第二个进程。pi-fast 等扩展的内存开关可能重置，需重新开启。仅关闭聊天 buffer 仍会复用旧进程；也可先 `/quit`，再从 Hub 恢复。
+
+桥接缺失、未知命令均明确拒绝，不回退到模型。`/settings`、`/tree`、`/fork`、`/clone`、`/trust`、`/share` 等终端 UI 专用命令会标记并提示限制，不把“目录一致”冒充“完整实现了终端界面”；`/hotkeys` 显示当前 Emacs 键位。
 
 ### 图片
 

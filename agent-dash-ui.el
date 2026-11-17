@@ -421,7 +421,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (when-let* ((s agent-dash--session))
     (let* ((meta (agent-dash-session-meta s))
            (provider (plist-get meta :provider))
-           (model (concat (when (member (plist-get meta :service-tier) '("fast" "priority"))
+           (model (concat (when (or (plist-get meta :fast-mode)
+                                    (member (plist-get meta :service-tier) '("fast" "priority")))
                             "⚡ ")
                           (or (plist-get meta :model) "model pending")))
            (thinking (plist-get meta :thinking))
@@ -439,6 +440,9 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                     short-model))
            (segments (agent-dash--stat-segments s))
            (help (concat (string-join segments " · ") "\n" right
+                         (when (plist-get meta :fast-mode)
+                           (concat "\nFast mode: enabled (client setting;"
+                                   " not a server-tier guarantee)."))
                          (when (member (plist-get meta :service-tier) '("fast" "priority"))
                            (format "\nFast: %s (last observed provider request/response)."
                                    (plist-get meta :service-tier)))

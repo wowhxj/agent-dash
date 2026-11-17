@@ -73,6 +73,37 @@
                                         :statusText tier))))
         (should-not (string-search "⚡" (agent-dash--header)))))))
 
+(ert-deftest agent-dash-pi-test-confirmed-fast-mode-in-header-before-request ()
+  "An extension-confirmed mode is not an observed server tier."
+  (let ((session (agent-dash-session-create 'pi temporary-file-directory)))
+    (agent-dash-emit session '(:type meta :model "gpt-6.1-sol" :provider "openai-codex"))
+    (with-temp-buffer
+      (setq-local agent-dash--session session)
+      ;; Raw notifications remain notices; only the bridge sets mode metadata.
+      (agent-dash-test-feed
+       session (concat "{\"type\":\"extension_ui_request\",\"method\":\"notify\","
+                       "\"message\":\"Fast mode enabled\",\"notifyType\":\"warning\"}"))
+      (should-not (string-search "⚡" (agent-dash--header)))
+      (agent-dash-test-feed
+       session (concat "{\"type\":\"extension_ui_request\",\"method\":\"setStatus\","
+                       "\"statusKey\":\"agent-dash-fast-mode\",\"statusText\":\"enabled\"}"))
+      (should (plist-get (agent-dash-session-meta session) :fast-mode))
+      (should-not (plist-get (agent-dash-session-meta session) :service-tier))
+      (should (string-search "⚡ gpt-6.1-sol" (agent-dash--header)))
+      (should (string-search "not a server-tier guarantee"
+                             (get-text-property 0 'help-echo (agent-dash--header))))
+      ;; Sending a fast command retires the observed tier, not a confirmed mode.
+      (agent-dash-set-data session :command-catalog '(("fast:2" . "Fast mode")))
+      (agent-dash-set-data session :pi-native-commands '(("session" . "Session")))
+      (cl-letf (((symbol-function 'agent-dash-backend-send) #'ignore))
+        (agent-dash-backend-command 'pi session "/fast:2" 'follow-up))
+      (should (string-search "⚡" (agent-dash--header)))
+      (agent-dash-test-feed
+       session (concat "{\"type\":\"extension_ui_request\",\"method\":\"setStatus\","
+                       "\"statusKey\":\"agent-dash-fast-mode\"}"))
+      (should-not (plist-get (agent-dash-session-meta session) :fast-mode))
+      (should-not (string-search "⚡" (agent-dash--header))))))
+
 (ert-deftest agent-dash-pi-test-fast-commands-clear-stale-status ()
   "Both disambiguated fast commands retire the previous observed tier."
   (let ((session (agent-dash-session-create 'pi temporary-file-directory)))
@@ -84,6 +115,36 @@
                  (lambda (&rest _)
                    (should-not (plist-get (agent-dash-session-meta session) :service-tier)))))
         (agent-dash-backend-command 'pi session (concat "/" name) 'follow-up)))))
+
+(ert-deftest agent-dash-pi-test-fast-refresh-only-after-command-completes ()
+  "Ask the bridge to read source-specific state, never resend a toggle."
+  (let ((session (agent-dash-session-create 'pi temporary-file-directory))
+        callback request writes)
+    (agent-dash-set-data session :pi-native-commands '(("session" . "Session")))
+    (cl-letf (((symbol-function 'agent-dash-pi--request)
+               (lambda (_session data &optional done)
+                 (setq request data callback done)))
+              ((symbol-function 'agent-dash-holder-write)
+               (lambda (_session data) (push data writes))))
+      (dolist (name '("fast:1" "fast:2" "fast"))
+        (setq writes nil)
+        (agent-dash-backend-send 'pi session (concat "/" name) nil 'follow-up)
+        (should (equal (plist-get request :type) "prompt"))
+        (should (equal (plist-get request :message) (concat "/" name)))
+        (should-not writes)
+        (funcall callback t nil nil)
+        (should (= 1 (length writes)))
+        (should (equal (plist-get (car writes) :type) "extension_ui_response"))
+        (should (string-prefix-p "agent-dash-fast-refresh:" (plist-get (car writes) :id)))
+        (should (equal (plist-get (car writes) :value) name)))
+      (dolist (text '("/fastish" "hello /fast:1" "/other"))
+        (setq writes nil)
+        (agent-dash-backend-send 'pi session text nil 'follow-up)
+        (funcall callback t nil nil)
+        (should-not writes))
+      (agent-dash-backend-send 'pi session "/fast:1" nil 'follow-up)
+      (funcall callback nil nil "Command failed")
+      (should-not writes))))
 
 (ert-deftest agent-dash-pi-test-tool-lifecycle ()
   (let ((s (agent-dash-session-create 'pi "/tmp")))

@@ -78,6 +78,140 @@ test('fast status follows structured tiers and resets on model/session changes',
   assert(!JSON.stringify(statuses).includes('NOT-EXPORTED'));
 });
 
+test('pi-fast confirms RPC mode immediately without inventing a provider tier', () => {
+  const handlers = new Map(), statuses = [], notices = [];
+  const original = function(...args) { notices.push(args); return 'delivered'; };
+  const ctx = { mode: 'rpc', model: { provider: 'openai-codex', id: 'gpt-6.1-sol' },
+    ui: { notify: original, setStatus: (key, value) => statuses.push([key, value]) } };
+  bindFastStatus({ on: (name, handler) => handlers.set(name, handler) });
+  const emit = (name, event = {}) => handlers.get(name)(event, ctx);
+  const mode = () => statuses.filter(([key]) => key === 'agent-dash-fast-mode').at(-1)?.[1];
+  const tier = () => statuses.filter(([key]) => key === 'agent-dash-fast').at(-1)?.[1];
+  const enabled = 'Fast mode enabled; requests ask for Fast processing, which can increase API charges or subscription usage.';
+  emit('session_start');
+  for (const text of ['Fast mode enabled', '/fast:2', 'Fast mode is unavailable for the current provider/model.',
+    'Failed to refresh model pricing', `quoted: ${enabled}`]) ctx.ui.notify(text, 'warning');
+  ctx.ui.notify(enabled, 'info');
+  assert.equal(mode(), undefined);
+  assert.equal(ctx.ui.notify(enabled, 'warning'), 'delivered');
+  assert.equal(mode(), 'enabled');
+  assert.equal(tier(), undefined); // No model request was sent to learn the mode.
+  emit('before_provider_request', { payload: {} });
+  emit('provider_stream_event', { provider: 'openai-codex', model: 'gpt-6.1-sol',
+    data: { response: { service_tier: 'default' } } });
+  assert.equal(mode(), 'enabled'); // Preference is not the server's resolved tier.
+  assert.equal(tier(), undefined);
+  ctx.ui.notify('Fast mode disabled.', 'info');
+  assert.equal(mode(), undefined);
+  ctx.ui.notify(enabled, 'warning');
+  emit('model_select');
+  assert.equal(mode(), 'enabled'); // Re-selecting a model doesn't turn Fast off.
+  const originalModel = ctx.model;
+  ctx.model = { provider: 'cliproxyapi', id: 'gpt-6.1-sol' };
+  emit('model_select');
+  assert.equal(mode(), undefined);
+  ctx.model = originalModel;
+  emit('model_select');
+  assert.equal(mode(), 'enabled'); // Restore the confirmed model's indication.
+  emit('session_start'); // Rebinding must not stack wrappers or duplicate notices.
+  const count = notices.length;
+  ctx.ui.notify(enabled, 'warning');
+  assert.equal(notices.length, count + 1);
+  emit('session_shutdown');
+  assert.equal(ctx.ui.notify, original);
+  assert.equal(mode(), undefined);
+  const statusCount = statuses.length;
+  ctx.ui.notify(enabled, 'warning');
+  assert.equal(statuses.length, statusCount);
+  ctx.mode = 'tui';
+  emit('session_start');
+  assert.equal(ctx.ui.notify, original);
+  assert.equal(statuses.length, statusCount);
+});
+
+test('CPA silent toggles use their source, saved preference and model capability, not command numbering', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dash-cpa-fast-'));
+  const handlers = new Map(), statuses = [];
+  const commands = [
+    { name: 'fast:9', sourceInfo: { source: 'npm:@router-for-me/pi-cliproxyapi-provider@1.4.25' } },
+    { name: 'fast:1', sourceInfo: { source: 'npm:pi-fast' } },
+  ];
+  const ctx = { mode: 'rpc', model: { provider: 'my-cpa', id: 'gpt-6.1-sol', baseUrl: 'http://localhost:8317/v1' },
+    ui: { notify() {}, setStatus: (key, value) => statuses.push([key, value]) } };
+  const save = fast => writeFile(join(dir, 'cliproxyapi.json'), JSON.stringify({ fast, providerId: 'my-cpa', apiKey: 'NOT-EXPORTED' }));
+  const mode = () => statuses.filter(([key]) => key === 'agent-dash-fast-mode').at(-1)?.[1];
+  const refresh = bindFastStatus({ on: (name, handler) => handlers.set(name, handler), getCommands: () => commands }, dir, {});
+  try {
+    await save(false);
+    await writeFile(join(dir, 'cliproxyapi-models.json'), JSON.stringify({
+      inferenceBaseUrl: 'http://localhost:8317/v1/', fastModelIds: ['gpt-6.1-sol'],
+    }));
+    handlers.get('session_start')({}, ctx);
+    assert.equal(mode(), undefined);
+    await save(true);
+    refresh(ctx, 'fast:1'); // pi-fast is not CPA, regardless of its suffix.
+    assert.equal(mode(), undefined);
+    refresh(ctx, 'fast:9'); // No notification, model inference or toggle guessing.
+    assert.equal(mode(), 'enabled');
+    assert.equal(statuses.filter(([key]) => key === 'agent-dash-fast').at(-1)[1], undefined);
+    await save(false); // An unrelated Pi process changes the shared file.
+    handlers.get('model_select')({}, ctx);
+    assert.equal(mode(), 'enabled'); // Do not mirror another process's mode.
+    for (const changed of [
+      { ...ctx.model, provider: 'openai-codex' },
+      { ...ctx.model, id: 'unsupported' },
+      { ...ctx.model, baseUrl: 'http://other/v1' },
+    ]) {
+      handlers.get('model_select')({}, { ...ctx, model: changed });
+      assert.equal(mode(), undefined);
+    }
+    handlers.get('model_select')({}, ctx);
+    assert.equal(mode(), 'enabled');
+    refresh(ctx, 'fast:9');
+    assert.equal(mode(), undefined);
+    // Failure/rollback leaves the persisted preference off: never infer on.
+    refresh(ctx, 'fast:9');
+    assert.equal(mode(), undefined);
+    await writeFile(join(dir, 'cliproxyapi.json'), '{bad json');
+    refresh(ctx, 'fast:9');
+    assert.equal(mode(), undefined);
+    await save(true);
+    await rm(join(dir, 'cliproxyapi-models.json'));
+    refresh(ctx, 'fast:9');
+    assert.equal(mode(), undefined); // Unknown support is not supported.
+    assert(!JSON.stringify(statuses).includes('NOT-EXPORTED'));
+    handlers.get('session_shutdown')({}, ctx);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('CPA startup environment and local command preferences remain distinct', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dash-cpa-env-'));
+  const handlers = new Map(), statuses = [];
+  const ctx = { mode: 'rpc', model: { provider: 'env-cpa', id: 'supported', baseUrl: 'http://localhost/v1/' },
+    ui: { setStatus: (key, value) => statuses.push([key, value]) } };
+  const mode = () => statuses.filter(([key]) => key === 'agent-dash-fast-mode').at(-1)?.[1];
+  const refresh = bindFastStatus({ on: (name, handler) => handlers.set(name, handler),
+    getCommands: () => [{ name: 'fast', sourceInfo: { path: '/checkout/pi-cliproxyapi-provider/extensions/index.ts' } }],
+  }, dir, { CLIPROXYAPI_FAST: 'true', CLIPROXYAPI_PROVIDER_ID: 'env-cpa' });
+  try {
+    await writeFile(join(dir, 'cliproxyapi.json'), '{"fast":false}');
+    await writeFile(join(dir, 'cliproxyapi-models.json'), JSON.stringify({
+      inferenceBaseUrl: ctx.model.baseUrl, fastModelIds: ['supported'],
+    }));
+    handlers.get('session_start')({}, ctx);
+    assert.equal(mode(), 'enabled'); // Env wins at process startup.
+    refresh(ctx, 'fast');
+    assert.equal(mode(), undefined); // A local toggle supersedes the startup env.
+    handlers.get('session_start')({}, ctx);
+    assert.equal(mode(), 'enabled');
+    await rm(join(dir, 'cliproxyapi.json')); // Environment-only CPA setup.
+    handlers.get('session_start')({}, ctx);
+    assert.equal(mode(), 'enabled');
+    handlers.get('session_shutdown')({}, ctx);
+    assert.equal(mode(), undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('advertises an exact native catalog without model commands', () => {
   const f = fixture();
   assert.deepEqual(JSON.parse(f.definition.description.slice(CATALOG_PREFIX.length)), commands);
@@ -156,6 +290,14 @@ test('terminal-only operations and busy contexts cannot reach models', async () 
   f.ctx.isIdle = () => false;
   await f.invoke('login', 'offline'); assert.equal(f.saved.length, 0);
 });
+test('reload cannot tear down the bridge while it is writing its own acknowledgement', async () => {
+  const f = fixture();
+  f.ctx.reload = () => { assert.fail('Reload must use the confirmed Emacs restart path'); };
+  await f.invoke('reload');
+  assert.equal(f.output.at(-1).success, false);
+  assert.match(f.output.at(-1).message, /confirm restarting/);
+});
+
 test('bridge is not a plaintext auth dialog in TUI mode', async () => {
   const f = fixture(); f.ctx.mode = 'interactive';
   await f.invoke('login', 'offline'); assert.equal(f.inputs.length, 0);
@@ -178,6 +320,26 @@ test('control channel never interprets ordinary prompts or ordinary UI responses
   events.get('session_start')({}, { mode: 'interactive' });
   assert.equal(input.listenerCount('data'), 1); dispose();
 });
+test('private fast refresh only reads after RPC completion, never invokes a command or model', () => {
+  const events = new Map(), input = new EventEmitter(), seen = [], native = [];
+  const pi = { on: (name, fn) => events.set(name, fn) };
+  input.on('data', () => {});
+  const ctx = { mode: 'rpc' };
+  const dispose = bindControlChannel(pi, value => native.push(value), input,
+    (context, value) => { assert.equal(context, ctx); seen.push(value); });
+  events.get('session_start')({}, ctx);
+  const packet = { type: 'extension_ui_response', id: 'agent-dash-fast-refresh:op', value: 'fast:1' };
+  input.emit('data', JSON.stringify({ ...packet, type: 'prompt' }) + '\n');
+  input.emit('data', JSON.stringify({ ...packet, id: 'ordinary' }) + '\n');
+  assert.deepEqual(seen, []);
+  input.emit('data', JSON.stringify(packet) + '\n');
+  assert.deepEqual(seen, ['fast:1']);
+  assert.deepEqual(native, []);
+  dispose();
+  input.emit('data', JSON.stringify(packet) + '\n');
+  assert.deepEqual(seen, ['fast:1']);
+});
+
 test('control bridge cannot consume buffered startup queries before RPC is ready', async () => {
   const events = new Map(), pi = { on: (name, fn) => events.set(name, fn) };
   const input = new PassThrough(), seen = [], rpc = [];

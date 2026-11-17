@@ -10,6 +10,7 @@
 (require 'subr-x)
 (defvar agent-dash-pi-executable)
 (declare-function agent-dash-pi--request "agent-dash-pi")
+(declare-function agent-dash-pi-reload "agent-dash-pi")
 (declare-function agent-dash-pi--refresh-stats "agent-dash-pi")
 (declare-function agent-dash-pi--on-state "agent-dash-pi")
 (declare-function agent-dash-backend-commands "agent-dash-core")
@@ -73,11 +74,13 @@
           (push entry ordinary))))
     (append (mapcar (lambda (entry)
                       (cons (car entry)
-                            (concat (cdr entry)
+                            (concat (if (equal (car entry) "reload")
+                                        "Restart Pi and resume saved session (asks first)"
+                                      (cdr entry))
                                     (unless (member (car entry)
                                                     '("model" "thinking" "export" "copy" "hotkeys"
                                                       "name" "session" "login" "logout"
-                                                      "new" "compact" "resume" "quit"))
+                                                      "new" "compact" "resume" "reload" "quit"))
                                       " [Pi terminal UI; never sent to a model]"))))
                     (agent-dash-pi-native-commands session))
             (agent-dash-command-entries (nreverse ordinary)))))
@@ -170,6 +173,9 @@
     (user-error "Use /%s [provider-id]; enter credentials only in the secure dialog" name))
   (pcase name
     ((or "login" "logout") (agent-dash-pi--bridge-command session name args))
+    ("reload"
+     (unless (string-empty-p args) (user-error "Use /reload without arguments"))
+     (agent-dash-pi-reload session))
     ("model"
      (let ((model (if (string-empty-p args)
                       (completing-read "Pi model: " (agent-dash-backend-models 'pi session) nil t)

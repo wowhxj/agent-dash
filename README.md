@@ -121,7 +121,9 @@ Pi completion uses its own built-in commands (24 in the currently verified versi
 
 `/login [provider-id]` and `/logout [provider-id]` use the running Pi runtime, including extension providers. Install/keep `agent-dash-pi-bridge.mjs` alongside the Elisp files. Login can select a provider and authentication method; all free-form authentication input is masked with `read-passwd` (including legacy OAuth API-key prompts and endpoint fields). Never put API keys after `/login`: authentication commands do not enter prompt history or model context. `C-g` cancels a dialog; errors do not automatically retry. Authorization URLs are displayed, not automatically opened, and the clipboard is not replaced.
 
-**Existing Pi holders must be stopped with `/quit` and restored from the Hub to load the bridge; closing the chat buffer alone reuses the old process.** The client will not restart a running task for you. Missing bridges and unknown commands fail closed, never falling back to inference. TUI-only commands such as `/settings`, `/tree`, `/fork`, `/clone`, `/trust`, `/share` and `/reload` are shown with a terminal-UI annotation and explicitly refused; a matching catalog is not a claim that the full terminal UI is implemented. `/hotkeys` shows the current Emacs bindings.
+After loading updated Elisp, `/reload` asks to **restart Pi and resume the same saved session**; it is not native hot reload. The chat buffer, unsent draft, model and thinking level are kept. Unsaved/unreadable sessions, running tasks, pending dialogs and queued messages are refused; a slow exit never starts a second process. In-memory extension toggles such as pi-fast may reset and need re-enabling. Closing the chat buffer alone still reuses its old process; `/quit` then Hub resume remains an alternative.
+
+Missing bridges and unknown commands fail closed, never falling back to inference. TUI-only commands such as `/settings`, `/tree`, `/fork`, `/clone`, `/trust` and `/share` are shown with a terminal-UI annotation and explicitly refused; a matching catalog is not a claim that the full terminal UI is implemented. `/hotkeys` shows the current Emacs bindings.
 
 ### Images
 

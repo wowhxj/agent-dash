@@ -1,6 +1,7 @@
 // Pi-only extension: native commands never enter the model conversation.
 // Authentication uses the running Pi runtime, including extension providers.
 import { realpath, access } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -155,12 +156,7 @@ export function registerBridge(pi, commands, write) {
             message = await authenticate(pi, ctx, command, args);
             break;
           case 'reload':
-            if (typeof ctx.reload !== 'function') {
-              throw new Error('Pi RPC cannot reload resources; stop and resume this session instead');
-            }
-            await ctx.reload();
-            message = 'Pi resources reloaded';
-            break;
+            throw new Error('Use agent-dash /reload to confirm restarting and resuming the saved session');
           case 'name':
             if (!args.trim()) throw new Error('Usage: /name <name>');
             pi.setSessionName(args.trim());
@@ -190,19 +186,116 @@ export function registerBridge(pi, commands, write) {
 export default async function extension(pi) {
   // Main's normal CLI bootstrap still owns resources, providers and trust.
   const handle = registerBridge(pi, await readBuiltinCommands(process.argv[1]));
-  bindControlChannel(pi, handle);
-  bindFastStatus(pi);
+  const refreshFast = bindFastStatus(pi, await readPiAgentDir(process.argv[1]));
+  bindControlChannel(pi, handle, process.stdin, refreshFast);
 }
 
-// Observe structured provider data, never command names or translated notices.
-export function bindFastStatus(pi) {
+// Keep the requested mode separate from the tier actually observed on the wire.
+// pi-fast only emits its structured icon in TUI mode. In RPC, these exact
+// successful-toggle notices are its only confirmation; never infer from /fast:N.
+const PI_FAST_ENABLED_NOTICE = 'Fast mode enabled; requests ask for Fast processing, which can increase API charges or subscription usage.';
+const PI_FAST_DISABLED_NOTICE = 'Fast mode disabled.';
+
+// Ask this Pi installation for its agent dir (including PI_CODING_AGENT_DIR),
+// not Emacs's environment. No preferences or plugin source files are modified.
+async function readPiAgentDir(executable) {
+  const cli = await realpath(executable);
+  for (const path of [join(dirname(cli), 'config.js'), join(dirname(cli), '../config.js')]) {
+    try {
+      const config = await import(pathToFileURL(path).href);
+      if (typeof config.getAgentDir === 'function') return config.getAgentDir();
+    } catch { /* Unsupported layout: keep tier observation, fail closed on config. */ }
+  }
+}
+
+function cpaCommand(command) {
+  const source = command?.sourceInfo;
+  return /^npm:@router-for-me\/pi-cliproxyapi-provider(?:@[^/]+)?$/.test(source?.source || '')
+    || /(?:^|[\\/])pi-cliproxyapi-provider(?:[\\/]|$)/.test(source?.path || '');
+}
+
+function readCpaMode(agentDir, env, afterCommand) {
+  if (!agentDir) return;
+  try {
+    let config = {};
+    try { config = JSON.parse(readFileSync(join(agentDir, 'cliproxyapi.json'), 'utf8')); }
+    catch (error) { if (afterCommand || error.code !== 'ENOENT') return; }
+    if (afterCommand && typeof config.fast !== 'boolean') return;
+    let enabled = config.fast ?? false;
+    if (!afterCommand && env.CLIPROXYAPI_FAST?.trim()) {
+      const flag = env.CLIPROXYAPI_FAST.trim().toLowerCase();
+      if (!['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'].includes(flag)) return;
+      enabled = ['1', 'true', 'yes', 'on'].includes(flag);
+    }
+    if (typeof enabled !== 'boolean') return;
+    let cache;
+    try { cache = JSON.parse(readFileSync(join(agentDir, 'cliproxyapi-models.json'), 'utf8')); }
+    catch { /* No advertised capability: do not mark any model Fast. */ }
+    return {
+      enabled,
+      provider: env.CLIPROXYAPI_PROVIDER_ID?.trim() || config.providerId?.trim() || 'cliproxyapi',
+      baseUrl: cache?.inferenceBaseUrl,
+      models: Array.isArray(cache?.fastModelIds) ? cache.fastModelIds : [],
+    };
+  } catch { /* Missing/invalid config is not proof of a successful toggle. */ }
+}
+
+export function bindFastStatus(pi, agentDir, env = process.env) {
+  let restoreNotify, cpaMode, piFastEnabled = false;
+  const piFastModels = new Set();
+  const modelKey = ctx => JSON.stringify([ctx.model?.provider, ctx.model?.id]);
+  const supportsCpa = ctx => cpaMode?.enabled && ctx.model?.provider === cpaMode.provider
+    && cpaMode.models.includes(ctx.model.id)
+    && typeof cpaMode.baseUrl === 'string' && cpaMode.baseUrl.length > 0
+    && typeof ctx.model.baseUrl === 'string'
+    && cpaMode.baseUrl.replace(/\/+$/, '') === ctx.model.baseUrl.replace(/\/+$/, '');
+  const publishMode = ctx => {
+    const enabled = (piFastEnabled && piFastModels.has(modelKey(ctx))) || supportsCpa(ctx);
+    if (ctx.mode === 'rpc') ctx.ui.setStatus('agent-dash-fast-mode', enabled ? 'enabled' : undefined);
+  };
   const publish = (ctx, tier) => {
     if (ctx.mode === 'rpc') {
       ctx.ui.setStatus('agent-dash-fast', tier === 'fast' || tier === 'priority' ? tier : undefined);
     }
   };
-  pi.on('session_start', (_event, ctx) => publish(ctx));
-  pi.on('model_select', (_event, ctx) => publish(ctx));
+  pi.on('session_start', (_event, ctx) => {
+    restoreNotify?.();
+    piFastEnabled = false;
+    piFastModels.clear();
+    cpaMode = pi.getCommands?.().some(cpaCommand) ? readCpaMode(agentDir, env, false) : undefined;
+    publishMode(ctx);
+    publish(ctx);
+    if (ctx.mode !== 'rpc' || typeof ctx.ui.notify !== 'function') return;
+    const ui = ctx.ui, original = ui.notify;
+    const notify = function(message, type, ...args) {
+      const result = original.call(this, message, type, ...args);
+      if ((message === PI_FAST_ENABLED_NOTICE && type === 'warning')
+          || (message === PI_FAST_DISABLED_NOTICE && type === 'info')) {
+        piFastEnabled = message === PI_FAST_ENABLED_NOTICE;
+        if (piFastEnabled && ctx.model) piFastModels.add(modelKey(ctx));
+        publishMode(ctx);
+        publish(ctx); // A previous request's tier is stale after a mode change.
+      }
+      return result;
+    };
+    ui.notify = notify;
+    restoreNotify = () => {
+      if (ui.notify === notify) ui.notify = original;
+      restoreNotify = undefined;
+    };
+  });
+  pi.on('model_select', (_event, ctx) => {
+    publishMode(ctx);
+    publish(ctx);
+  });
+  pi.on('session_shutdown', (_event, ctx) => {
+    restoreNotify?.();
+    piFastEnabled = false;
+    piFastModels.clear();
+    cpaMode = undefined;
+    publishMode(ctx);
+    publish(ctx);
+  });
   pi.on('before_provider_request', (event, ctx) => {
     publish(ctx, event.payload?.service_tier);
   });
@@ -215,9 +308,19 @@ export function bindFastStatus(pi) {
       publish(ctx, response.service_tier);
     }
   });
+  // Read only after this process finishes the actual CPA command. Watching the
+  // shared config would incorrectly mirror toggles made in other Pi processes.
+  return (ctx, name) => {
+    if (ctx.mode !== 'rpc' || !/^fast(?::[0-9]+)?$/.test(name)) return;
+    if (!pi.getCommands?.().some(command => command.name === name && cpaCommand(command))) return;
+    const next = readCpaMode(agentDir, env, true);
+    if (next) cpaMode = next;
+    publishMode(ctx);
+    publish(ctx);
+  };
 }
 
-export function bindControlChannel(pi, handle, input = process.stdin) {
+export function bindControlChannel(pi, handle, input = process.stdin, refreshFast) {
   let context;
   // session_start precedes the SDK's RPC reader. Becoming stdin's first data
   // listener would drain buffered get_state/get_entries before the SDK sees them.
@@ -251,9 +354,15 @@ export function bindControlChannel(pi, handle, input = process.stdin) {
       pending = pending.slice(end + 1);
       const skip = dropping;
       dropping = false;
-      if (skip || !line.includes('agent-dash-native:')) continue;
+      if (skip || (!line.includes('agent-dash-native:')
+                   && !line.includes('agent-dash-fast-refresh:'))) continue;
       try {
         const record = JSON.parse(line);
+        if (record.type === 'extension_ui_response' && context
+            && record.id?.startsWith('agent-dash-fast-refresh:') && typeof record.value === 'string') {
+          refreshFast?.(context, record.value);
+          continue;
+        }
         if (record.type === 'extension_ui_response'
             && record.id?.startsWith('agent-dash-native:') && context) {
           const data = JSON.parse(Buffer.from(record.value, 'base64').toString('utf8'));
