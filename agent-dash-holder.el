@@ -59,7 +59,7 @@ is written after the log reader has drained the agent's output.")
 
 (defun agent-dash-holder-alive-p (dir)
   "Whether the agent of holder DIR is running."
-  ;; ponytail: trusts the pid file; a recycled pid would look alive.
+  ;; trusts the pid file; a recycled pid would look alive.
   (when-let* ((pid (agent-dash-holder-pid dir)))
     (eq 0 (signal-process pid 0))))
 

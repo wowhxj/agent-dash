@@ -24,6 +24,18 @@
   "Return the transcript text above the separator."
   (buffer-substring-no-properties (point-min) agent-dash--transcript-end))
 
+(ert-deftest agent-dash-test-meta-fields-do-not-depend-on-key-order ()
+  (let* ((session (agent-dash-session-create 'fake temporary-file-directory))
+         (event '(:model "first" :type meta :thinking "high")))
+    (agent-dash-emit session event)
+    (should (equal (plist-get (agent-dash-session-meta session) :model) "first"))
+    (should (equal (plist-get (agent-dash-session-meta session) :thinking) "high"))
+    (should-not (plist-member (agent-dash-session-meta session) :type))
+    (agent-dash-emit session '(:model "second" :type meta))
+    (should (equal (plist-get (agent-dash-session-meta session) :model) "second"))
+    (should (equal (plist-get (agent-dash-session-meta session) :thinking) "high"))
+    (should (equal event '(:model "first" :type meta :thinking "high")))))
+
 (ert-deftest agent-dash-test-send-clears-draft-and-records-history ()
   (agent-dash-test-with-chat
    (should (equal (car agent-dash-fake-calls)

@@ -179,13 +179,8 @@ The hub installs a function that also sees open chat buffers.")
           (t "待生成"))))
 
 (defun agent-dash-summary-register (rows)
-  "Remember ROWS, the latest listing of one or more backends.
-A summary imported as current takes the row's stamp the first time the
-row is seen, so it is not requested again."
+  "Remember ROWS, the latest listing of one or more backends."
   (dolist (row rows)
-    (let ((entry (agent-dash-summary-entry row)))
-      (when (plist-get entry :import-current)
-        (agent-dash-summary--put row :import-current nil :stamp (agent-dash-summary--stamp row))))
     (puthash (agent-dash-summary-key row) row agent-dash-summary--sessions)))
 
 (defun agent-dash-summary-forget (row)
@@ -193,44 +188,6 @@ row is seen, so it is not requested again."
   (remhash (agent-dash-summary-key row) agent-dash-summary--sessions)
   (remhash (agent-dash-summary-key row) agent-dash-summary--cache)
   (agent-dash-summary--save))
-
-;;;; Import from ashub
-
-(declare-function ashub--all-sessions "ext:ashub")
-(declare-function ashub-summary-entry "ext:ashub-summary")
-(declare-function ashub-summary--stamp "ext:ashub-summary")
-(declare-function ashub-session-agent "ext:ashub-core" t t)
-(declare-function ashub-session-id "ext:ashub-core" t t)
-
-(defun agent-dash-summary-import-ashub ()
-  "Copy the summaries of the running ashub hub into this cache.
-ashub lists the same sessions, so its summaries need no new model calls.
-Only sessions without a summary here are filled.  Return the count."
-  (interactive)
-  (agent-dash-summary--load)
-  (let ((hub (get-buffer "*ashub*")) (count 0))
-    (unless (and (featurep 'ashub-summary) hub)
-      (user-error "需要已载入 ashub 且打开过 *ashub*"))
-    (dolist (session (with-current-buffer hub (ashub--all-sessions)))
-      (let* ((entry (ashub-summary-entry session))
-             (summary (plist-get entry :summary))
-             (key (format "%s:%s" (ashub-session-agent session) (ashub-session-id session))))
-        (when (and (stringp summary)
-                   (not (plist-get (gethash key agent-dash-summary--cache) :summary)))
-          (puthash key
-                   (list :summary summary :generated-at (plist-get entry :generated-at)
-                         :model (plist-get entry :model) :imported 'ashub
-                         ;; Current in ashub: adopt our stamp when the row is listed.
-                         :import-current (equal (plist-get entry :checked-stamp)
-                                                (ashub-summary--stamp session)))
-                   agent-dash-summary--cache)
-          (cl-incf count))))
-    (agent-dash-summary-register (hash-table-values agent-dash-summary--sessions))
-    (agent-dash-summary--save)
-    (agent-dash-summary--notify)
-    (when (called-interactively-p 'interactive)
-      (message "已从 ashub 导入 %d 条摘要" count))
-    count))
 
 ;;;; One request
 
@@ -459,16 +416,13 @@ Call ON-RESPONSE with the reply."
 ;;;###autoload
 (define-minor-mode agent-dash-summary-mode
   "Keep one-sentence Chinese summaries of saved sessions through gptel.
-Opt in explicitly: user/assistant dialogue (no tool calls or results) is
-sent to your default gptel backend and model.  No agent is started."
+Enabled by default when `agent-dash-summary-enable' is non-nil.
+User/assistant dialogue (no tool calls or results) is sent to your default
+gptel backend and model.  No agent is started."
   :global t
   (agent-dash-summary--load)
   (if agent-dash-summary-mode
       (progn
-        ;; First run next to ashub: start from its summaries.
-        (when (and (zerop (hash-table-count agent-dash-summary--cache))
-                   (featurep 'ashub-summary) (get-buffer "*ashub*"))
-          (agent-dash-summary-import-ashub))
         (setq agent-dash-summary--paused nil agent-dash-summary--diagnostic nil
               agent-dash-summary--next-scan 0)
         (unless (timerp agent-dash-summary--timer)

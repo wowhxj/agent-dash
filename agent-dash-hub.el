@@ -919,11 +919,10 @@ Candidates keep the list order and show the table header as their group."
                     (if (plist-get row :exact) "最后一条用户消息" "来源时间")
                     (if (agent-dash-hub-live-p row) "yes" "no"))
             (when (plist-get row :title) (format "Title: %s\n" (plist-get row :title)))
-            (format "Summary model: %s; generated: %s%s\n" (or (plist-get entry :model) "unknown")
+            (format "Summary model: %s; generated: %s\n" (or (plist-get entry :model) "unknown")
                     (if (plist-get entry :generated-at)
                         (format-time-string "%Y-%m-%d %H:%M:%S" (plist-get entry :generated-at))
-                      "unknown")
-                    (if (plist-get entry :imported) "（导入自 ashub）" ""))
+                      "unknown"))
             (when (plist-get entry :error) (format "Summary error: %s\n" (plist-get entry :error)))
             (format "\nFirst user message:\n%s\n\nLast user message:\n%s\n\n"
                     (agent-dash-hub--first-text row) (agent-dash-hub--last-text row)))))

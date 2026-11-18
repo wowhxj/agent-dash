@@ -1,15 +1,15 @@
 # agent-dash 设计
 
-日期：2026-11-12；状态：第 2 步定稿，后续实现以本文件为合同。
+状态：独立 package 的架构与协议约定；使用方式见 README.zh-CN.md。
 
 ## 1. 关键决策
 
 | # | 决策 | 理由 |
 |---|---|---|
-| D1 | **通用 holder**：Pi、Claude、Codex、Hermes 以及 managed 模式的 DSH Host（`dsh web`）共用一个 `sh` + FIFO + 只追加日志的后台持有进程（`agent-dash-holder.el`） | 三者都是 stdio JSONL 协议。emacs-claude 已验证该模式能在 buffer / Emacs 退出后继续运行。它取代 emacs-pi 的 545 行 Node bridge，满足“尽量纯 Elisp” |
+| D1 | **通用 holder**：Pi、Claude、Codex、Hermes 以及 managed 模式的 DSH Host（`dsh web`）共用一个 `sh` + FIFO + 只追加日志的后台持有进程（`agent-dash-holder.el`） | stdio JSONL 后端与 managed DSH Host 共用进程生命周期管理，buffer / Emacs 退出后仍可继续运行 |
 | D2 | DSH 客户端直连 Host（HTTP RPC + websocket）；Host 是 Desktop，或由 holder 托管的 `dsh web` | Host 本身就是常驻服务。launch URL 可以多次兑换 cookie（实测两次都返回 303），所以 Emacs 重启后读取 holder 日志里的 URL 即可重新登录，不需要旧版的 Node supervisor |
 | D3 | 后端用 `cl-defgeneric`，按 `(eql BACKEND-SYMBOL)` 分派 | 已有 4 个以上实现，不是只有一个实现的抽象。UI 不写 `pcase backend` |
-| D4 | 后端只产出**统一事件**（plist），UI 是事件的 reducer | 历史回放、实时流、重连共用同一条代码路径 |
+| D4 | 后端只产出**统一事件**（plist），core 是事件的 reducer | 历史回放、实时流、重连共用同一条代码路径 |
 | D5 | 时间线条目按 `:id` upsert | 同一消息出现多次（Pi 的 `message_end`/`turn_end`/`agent_end`，Claude 回放）也只显示一次 |
 
 ## 2. 数据
@@ -45,7 +45,7 @@
 | `request` | `:id :kind :title :options :default :questions` | 需要用户回答：`kind` 取 `confirm` / `select` / `input` / `permission` / `questions`（`:questions` 是 `(:question :options :multi)` 列表；答案按问题顺序排列，单选为字符串，多选为字符串列表）。用 `agent-dash-backend-respond` 回答 |
 | `request-done` | `:id :status` | 请求已回答或撤回；状态默认为 `answered`，取消/超时为 `cancelled`，重复完成事件幂等 |
 
-ponytail：`assistant` 用整段快照而不是 delta。好处是 reducer 无状态，回放幂等；代价是每次刷新都要复制整条消息的文本。消息过长导致流式卡顿时，再加 `:append`。
+`assistant` 用整段快照而不是 delta。好处是 reducer 无状态，回放幂等；代价是每次刷新都要复制整条消息的文本。消息过长导致流式卡顿时，再加 `:append`。
 
 ### 2.3 时间线条目
 
@@ -86,7 +86,7 @@ ponytail：`assistant` 用整段快照而不是 delta。好处是 reducer 无状
 
 stdout 必须是管道而不是普通文件：Hermes ACP（Python asyncio）遇到普通文件会报 `Pipe transport is only for pipes, sockets and character devices` 并退出（2026-11-12 实测）。
 
-- 启动：`nohup sh -c SCRIPT`，`call-process` 的 destination 设为 0，Emacs 不持有该进程。stdin 经 `cat` 中继（Claude 读 FIFO 超过约 64 KiB 后停止读取，这是 emacs-claude 已验证的现象）。
+- 启动：`nohup sh -c SCRIPT`，`call-process` 的 destination 设为 0，Emacs 不持有该进程。stdin 经 `cat` 中继（Claude 读 FIFO 超过约 64 KiB 后停止读取，因此使用中继隔离 FIFO 读取）。
 - 写：每个 session 一个常驻 `cat > in` 子进程，保证大消息不交错。
 - 读：`tail -c +OFFSET -f out.jsonl`，按 LF 分帧，`json-parse-string`。
 - 存活：`signal-process pid 0`。
@@ -98,12 +98,12 @@ stdout 必须是管道而不是普通文件：Hermes ACP（Python asyncio）遇�
 
 不承诺重启电脑后续跑；holder 丢失时显示 `dead`，并提供“从历史恢复”。
 
-## 5. 协议映射表（验证第 2 步）
+## 5. 协议映射表
 
 证据来源：
 - Pi 1.5.0 官方文档：`node_modules/@earendil-works/pi-coding-agent/docs/{rpc,json,rpc-extension-ui}.md`。另实测 `pi --mode rpc --no-session` 的 `get_state` / `get_messages`，以及启动时的 `extension_ui_request`：1 条 `notify`、8 条 `setStatus`、13 条 `setWidget`。
-- Claude Code 2.1.322：本机 emacs-claude holder 日志中出现的全部 `type/subtype`（只统计类型，未读内容）。
-- DSH：`~/sandbox/emacs-dsh/emacs-dsh.el` 的事件 reducer（`emacs-dsh--event`、`--stream`、`--on-frame`）。
+- Claude Code 2.1.322：stream-json 的 `type/subtype` 事件。
+- DSH：Host 的 HTTP RPC、remote.mux 与控制流事件。
 
 ### 5.1 Pi（RPC，经 holder）
 
@@ -201,13 +201,13 @@ DSH 的 `session/follow` 快照提供初始投影；同一 websocket 同时订�
 2. 新增 `request` / `request-done`（Claude 权限请求、Pi 扩展对话框、DSH 审批）。
 3. `status` / `usage` 合并进 `meta`；`thinking` 作为 `assistant` 的 `:thinking` 字段。
 
-## 6. 界面（以 emacs-pi DESIGN §7、§9、§11 为蓝本）
+## 6. 统一界面
 
 - 历史区只读，底部是输入区。`RET` / `C-c C-c` 发送（运行中发送即 follow-up），`S-RET` 换行，`C-c C-s` 暂存 steer、`C-c q` 管理队列并用 `x` 显式应用，`C-c C-k` 停止，`C-c C-q` 退出（按 `:quit` 语义），`M-p` / `M-n` 浏览输入历史，非输入区按 `i` 或任意位置 `C-c C-i` 聚焦输入框末尾（输入区内 `i` 保持普通字符输入与数字前缀行为），`C-c C-b` 切换聊天，`C-c C-r` 恢复历史会话，`TAB` 在过程行上折叠/展开。
-- 五个后端共用同一套 UI 布局与交互，不按后端复制界面。用户回合的正文以 highlight face 全宽高亮，前导分隔空行不带高亮 face；底部 `You>` 通过 overlay 装饰输入区，不进入发送内容或历史。输入 face 与 emacs-pi 一致：继承 widget-field 背景、明确 `:underline nil`、`:extend t`，不硬编码主题颜色。输入 overlay 的 after-string 用 display-only stretch space 填充到窗口右边缘，保证空草稿和末行也铺满背景；填充不进入草稿、发送内容或历史。填充首字符必须带 `cursor t`，将光标锚定在提示符/草稿后，而非虚拟提示符开头或窗口右边缘。header-line 置顶最近一条用户消息。
+- 五个后端共用同一套 UI 布局与交互，不按后端复制界面。用户回合的正文以 highlight face 全宽高亮，前导分隔空行不带高亮 face；底部 `You>` 通过 overlay 装饰输入区，不进入发送内容或历史。输入 face：继承 widget-field 背景、明确 `:underline nil`、`:extend t`，不硬编码主题颜色。输入 overlay 的 after-string 用 display-only stretch space 填充到窗口右边缘，保证空草稿和末行也铺满背景；填充不进入草稿、发送内容或历史。填充首字符必须带 `cursor t`，将光标锚定在提示符/草稿后，而非虚拟提示符开头或窗口右边缘。header-line 置顶最近一条用户消息。
 - 工具、纯 thinking 消息与 Pi 带 toolCall 的中间消息按用户回合收进 `Process · N steps`。后端 running 时仅默认展开当前 Process 分组，thinking 和工具调用各显示一条精简摘要，细节保持默认折叠且与分组展开状态独立；整轮 idle/dead 后自动折叠，最终答复不隐藏，不能将单条 assistant final 当作整轮结束。`run` 事件没有时间线 item，也必须触发分组更新。标题 `RET`/`TAB` 控制整组，单步可手动折叠；流式更新和重绘保留手动选择，结束转换仍收起整组。用已结束标记区分历史与运行状态晚到的未完成快照，新 run 信号本身不重开已完成历史；同一用户回合的新过程活动可重新展开。有正文的最终消息，其 thinking 仍单独折叠。
-- tab-line 左对齐显示已知统计，右边缘对齐显示 `(provider) 模型 · 思考等级`，并在后端提供时追加 Agent 预设、权限模式，对齐锚点与 emacs-pi 一致。窄窗口先去掉低优先级统计，再去掉 provider，必要时截断；完整信息保留在 help-echo。Pi 统计含 context、token、prompt/call 数、缓存读取比例和预估费用（非账单）；其他后端缺失的数据不虚构。实际 RPC `get_session_stats` 的 `contextUsage` 提供上下文；附着后和 `agent_settled` 时刷新，重绘不请求数据。
-- 五后端共用精简 mode-line：`Pi thinking |` / `Claude idle` / `DSH waiting ?1` 等。活动指示器与 emacs-pi 一样放在普通 `mode-line-misc-info` 区，不占 `mode-line-process`、不重复模型信息。运行中每 150ms 轮换 `|/-\`，只重绘状态、不请求后端、不改草稿；空闲、断开、关闭 buffer 或切换 major mode 时清理 timer。非空队列显示 `[S1 F2]`、待处理请求显示 `?N`，具体阶段（如 `waiting for model` / `responding`）与操作键放在 tooltip。重复热载不会增加 indicator 或 timer；`agent-dash-refresh-chat` 可无损重建显示，保留连接、草稿和输入区光标位置。队列数量合计本地待发送和后端上报项；本地队列暂停时追加 paused，不暗示后端自身暂停。
+- tab-line 左对齐显示已知统计，右边缘对齐显示 `(provider) 模型 · 思考等级`，并在后端提供时追加 Agent 预设、权限模式。窄窗口先去掉低优先级统计，再去掉 provider，必要时截断；完整信息保留在 help-echo。Pi 统计含 context、token、prompt/call 数、缓存读取比例和预估费用（非账单）；其他后端缺失的数据不虚构。实际 RPC `get_session_stats` 的 `contextUsage` 提供上下文；附着后和 `agent_settled` 时刷新，重绘不请求数据。
+- 五后端共用精简 mode-line：`Pi thinking |` / `Claude idle` / `DSH waiting ?1` 等。活动指示器放在普通 `mode-line-misc-info` 区，不占 `mode-line-process`、不重复模型信息。运行中每 150ms 轮换 `|/-\`，只重绘状态、不请求后端、不改草稿；空闲、断开、关闭 buffer 或切换 major mode 时清理 timer。非空队列显示 `[S1 F2]`、待处理请求显示 `?N`，具体阶段（如 `waiting for model` / `responding`）与操作键放在 tooltip。重复热载不会增加 indicator 或 timer；`agent-dash-refresh-chat` 可无损重建显示，保留连接、草稿和输入区光标位置。队列数量合计本地待发送和后端上报项；本地队列暂停时追加 paused，不暗示后端自身暂停。
 - 草稿与历史分开存放：后台输出不能修改输入区。
 - `agent-dash-images.el` 统一附件与缩略图，规范为 `(:data BASE64 :mime-type MIME :name NAME)`。输入区的待发送缩略图在 overlay before-string 中，不进入草稿/历史；删除、后台输出和重绘保持草稿与光标。本地签名/大小校验限定 PNG/JPEG/GIF/WebP，不执行 SVG、不自动下载远程图片。终端或无法解码时保留可操作占位文本，原图通过 Emacs image-mode 查看。
 - 五后端分别编码为 Pi image/mimeType、Claude base64 source、Codex image data URL、DSH image/mediaType、Hermes ACP image/mimeType；Hermes 声明不支持时拒绝附件。DSH 历史附件在接收协议数据时经 Host session/attachment 读取并按会话缓存，重绘不做 RPC。恢复时归一化用户、助手和工具的图片块，纯图片消息也保留。
@@ -235,15 +235,14 @@ Pi 内置命令不会使用 `prompt` 兜底：可映射的操作走原生 RPC，
 - 队列编辑器使用独立的轻量会话副本与图文 composer，不使用真实会话的数据/连接，也不继承发送、停止或退出后端的键位/kill hook。持有条目编辑租约，队首编辑时后续 follow 不越过；取消不改原条目，保存原子替换 text/wire-text/images。编辑、删除、排序与转换通过稳定 ID 操作，不依赖会移动的行号；原聊天的草稿、附件与输入光标保持不变。
 - 默认保留 100 条记录、64 MiB 图片 base64，单消息仍受 10 图/28 MiB 以及原格式校验限制。会话关闭/断线/主动取消会暂停，断线交接记为 unknown；内存注册表保留队列供重新打开，先显式重连再继续，不自动启动 holder。退出 Emacs 不持久化队列或凭据，界面和 README 明示该限制；不保证与其他客户端同时提交的跨客户端顺序。
 
-## 7. hub、摘要、搜索（复刻 ashub）
+## 7. Hub、摘要与搜索
 
-- `agent-dash-hub.el`：只调用后端接口（`sessions` / `transcript` / `delete`），没有按后端分支的代码。所有来源共用一份会话清单，逐个来源用定时器读取，header 显示扫描进度和失败的来源。分组、筛选、transient 菜单（`N` / `f` / `a` / `?`）、详情、删除标记、项目重定向（`agent-dash-hub-project-relocations`）、诊断，键位与 ashub 相同。
+- `agent-dash-hub.el`：只调用后端接口（`sessions` / `transcript` / `delete`），没有按后端分支的代码。所有来源共用一份会话清单，通过独立 batch Emacs 子进程异步读取；Hub、摘要和搜索共享历史读取任务，header 显示扫描进度和失败的来源。分组、筛选、transient 菜单（`N` / `f` / `a` / `?`）、详情、删除标记、项目重定向（`agent-dash-hub-project-relocations`）、诊断。
 - `agent-dash-summary.el`：主入口按默认值为 t 的 `agent-dash-summary-enable` 启动 `agent-dash-summary-mode`。加载前设为 nil 可关闭自动启动（use-package 放在 `:init`）；运行时用 `(agent-dash-summary-mode -1)` 停止调度器。会话关闭并稳定 300 秒后才摘要，新任务通常至少间隔 60 秒，最新的会话优先。长对话会分段请求再汇总，该间隔不是单次模型调用或费用上限。内容指纹不变就不重复请求；失败后指数退避，401/403 或 gptel 缺失时整体暂停。gptel 为可选依赖，使用其默认后端/模型发送用户与助手对话（不含工具输出，但仍可能含隐私）。缓存文件为 `agent-dash-directory/summaries.eld`，只存摘要与调度元数据，不持久化完整 transcript。
-- 摘要导入：启动时若已加载 `ashub-summary` 且存在 `*ashub*` buffer，读取该 Hub 的会话清单与摘要访问器，不逆解其磁盘缓存键、不调用模型。也可手动运行 `agent-dash-summary-import-ashub`。按 agent/id 匹配，仅填充本地尚无摘要的条目；源条目 checked-stamp 与 ashub 当前 stamp 一致时，首次注册本地会话采用其 stamp，否则保留原文并显示待更新。导入不会覆盖已有摘要；后续更新可能调用模型。两套摘要模式同时运行可能重复工作和计费，不自动停用旧 ashub 调度器。
-- Hub 交互：`N` / `f` / `a` / `?` 使用 transient，新建与筛选组织方式对齐 ashub。详情为助手左、用户右的气泡，逐条带复制按钮；`m` 折叠元数据、`C-c C-w` 复制原始对话。详情缓存对话，`g` 只重新排版，重新打开才重新获取。
+- Hub 交互：`N` / `f` / `a` / `?` 使用 transient，分别组织新建、筛选、操作和帮助。详情为助手左、用户右的气泡，逐条带复制按钮；`m` 折叠元数据、`C-c C-w` 复制原始对话。详情缓存对话，`g` 只重新排版，重新打开才重新获取。
 - `agent-dash-search.el`：分两轮。第一轮逐批抽取逐字证据，证据必须能在输入原文中找到，否则拒绝；第二轮只依据这些证据回答，引用必须覆盖全部来源编号。
 - 各来源数据的限制：DSH 的 `session/list` 不提供首末句，后端从 bridge 文件同目录下 `storages/session_projcache/sessions/<id>.json` 的 `record.rows.turnOutline` 读取版本 2 的用户 prompt，过滤空白及非字符串值。缓存缺失或版本不支持时返回 nil；它是 Host 维护的投影，可能滞后或截断，不代表实时完整 transcript。Codex 优先读取最新数字版本的 `state_N.sqlite`，归档、内部及 rollout 丢失的元数据线程均保留；缺少 rollout 时不虚构末句。归档会话默认隐藏、不再排队摘要，但保留旧摘要，可切换摘要范围查看。没有索引时，app-server 显式列出全部来源及两种归档状态并处理 `nextCursor`，不使用默认交互来源过滤。Hermes 优先读取原生 SQLite 历史，ACP 仅为回退。Pi 递归发现所有 JSONL，以 header cwd 判定项目并用同一发现逻辑定位恢复文件；损坏文件逐个隔离，读取警告单独显示，不丢弃同源的有效会话。DSH 空会话保留 `:empty` 标记，不读取其 prompt 缓存，由共享摘要范围过滤。
 
 ## 8. 不做（本版）
 
-TRAMP、Windows、分支树 UI、fork / clone、队列逐条编辑（mode-line 只显示队列计数）、DSH 模型切换。
+TRAMP、Windows、分支树 UI、fork / clone、DSH 模型切换。

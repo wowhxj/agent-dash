@@ -33,7 +33,8 @@
 
 (defcustom agent-dash-dsh-bridge-file
   (expand-file-name "emacs-dsh-bridge.json" (or (getenv "DSH_HOME") "~/.dsh"))
-  "Bridge file published by DSH Desktop; it holds credentials, never share it."
+  "Bridge file published by DSH Desktop; it holds credentials, never share it.
+The default filename is a Desktop protocol contract, not a package dependency."
   :type 'file)
 
 (defcustom agent-dash-dsh-max-messages 100
@@ -113,7 +114,7 @@ The cookie lives only in memory.")
         (url-cookie-secure-storage nil)
         (url-proxy-services (cons '("no_proxy" . "127\\.0\\.0\\.1") url-proxy-services))
         (result nil))
-    ;; ponytail: waits synchronously; the Host is local, so calls are short.
+    ;; waits synchronously; the Host is local, so calls are short.
     (url-retrieve url (lambda (_status)
                         (goto-char (point-min))
                         (let* ((code (and (looking-at "HTTP/[0-9.]+ \\([0-9]+\\)")
@@ -781,7 +782,7 @@ This runs on protocol input, never during display-only redraw."
               ws (agent-dash-dsh--open-frame
                   id "session/follow"
                   (list :request (list :address (list :kind "session" :sessionId id)
-                                       ;; ponytail: a session longer than this is cut.
+                                       ;; a session longer than this is cut.
                                        :maxMessages 100000)))))
            (lambda (data)
              (when (equal (agent-dash-jget data "streamId") id)

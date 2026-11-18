@@ -80,6 +80,32 @@
        (agent-dash-summary--scan)
        (should (= (hash-table-count agent-dash-history--jobs) 0))))))
 
+(ert-deftest agent-dash-history-async-test-consumer-errors-are-isolated ()
+  (agent-dash-history-async-test-with-reader
+   (let* ((calls nil)
+          (agent-dash-history-update-hook
+           (list (lambda (&rest _) (push 'broken-hook calls) (error "Broken hook"))
+                 (lambda (&rest _) (push 'hook calls))))
+          (process (agent-dash-history-request
+                    'history-fixture 'sessions
+                    (lambda (_) (push 'broken-callback calls) (error "Broken callback"))))
+          (output (process-buffer process))
+          (stderr (process-get process 'agent-dash-stderr))
+          result)
+     (should (eq process (agent-dash-history-request
+                          'history-fixture 'sessions
+                          (lambda (reply) (push 'callback calls) (setq result reply)))))
+     (agent-dash-test-wait (lambda () result))
+     (should (plist-get result :ok))
+     (should (equal (reverse calls) '(broken-hook hook broken-callback callback)))
+     (should (gethash 'history-fixture agent-dash-history--completed))
+     (should (zerop (hash-table-count agent-dash-history--jobs)))
+     (should-not (buffer-live-p output))
+     (should-not (buffer-live-p stderr))
+     ;; Completion remains exactly-once even after a consumer failed.
+     (agent-dash-history--finish process result)
+     (should (= (length calls) 4)))))
+
 (ert-deftest agent-dash-history-async-test-errors-preserve-old-rows ()
   "Reader failures, crashes and invalid output retain usable cached rows."
   (dolist (mode '(error exit invalid))

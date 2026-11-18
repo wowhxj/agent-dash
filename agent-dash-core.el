@@ -317,6 +317,16 @@ LIMIT, so it is dropped."
         ;; The first line may start mid-record, the last may be unfinished.
         (butlast (if (> size bytes) (cdr lines) lines))))))
 
+(defun agent-dash-file-find-first (file predicate)
+  "Return the first non-nil PREDICATE value over FILE's lines, oldest first.
+Read growing windows from the beginning until a complete matching record
+is found or the file is exhausted.  Ignore an unfinished final line."
+  (let ((size (file-attribute-size (file-attributes file))) (window (* 256 1024)) found)
+    (while (and (not found) window)
+      (setq found (seq-some predicate (agent-dash-file-lines file window))
+            window (and (< window size) (* window 8))))
+    found))
+
 (defun agent-dash-file-find-last (file predicate)
   "Return the first non-nil PREDICATE value over FILE's lines, newest first.
 Reads growing windows from the end, so long tool-heavy sessions still
@@ -386,21 +396,23 @@ find an early match without reading small files twice."
       ('queue (setf (agent-dash-session-queue session)
                     (list :steering (plist-get event :steering)
                           :follow-up (plist-get event :follow-up))))
-      ('meta (setf (agent-dash-session-meta session)
-                   (agent-dash--plist-merge (agent-dash-session-meta session)
-                                            (cddr event))))
+      ('meta
+       (cl-loop for (key value) on event by #'cddr
+                unless (eq key :type)
+                do (setf (agent-dash-session-meta session)
+                         (plist-put (agent-dash-session-meta session) key value))))
       ('request
-       (setf (agent-dash-session-requests session)
-             (append (cl-remove (plist-get event :id)
-                                (agent-dash-session-requests session)
-                                :key (lambda (r) (plist-get r :id))
-                                :test #'equal)
-                     (list event)))
-       ;; Keep dialogs outside folded tool output, with a separate ID space.
-       (let ((dialog (copy-sequence event)))
-         (setq dialog (plist-put dialog :id (cons 'request (plist-get event :id)))
-               dialog (plist-put dialog :status 'pending)
-               item (agent-dash--upsert session dialog))))
+        (setf (agent-dash-session-requests session)
+              (append (cl-remove (plist-get event :id)
+                                 (agent-dash-session-requests session)
+                                 :key (lambda (r) (plist-get r :id))
+                                 :test #'equal)
+                      (list event)))
+        ;; Keep dialogs outside folded tool output, with a separate ID space.
+        (let ((dialog (copy-sequence event)))
+          (setq dialog (plist-put dialog :id (cons 'request (plist-get event :id)))
+                dialog (plist-put dialog :status 'pending)
+                item (agent-dash--upsert session dialog))))
       ('request-done
        (setf (agent-dash-session-requests session)
              (cl-remove (plist-get event :id)

@@ -7,8 +7,8 @@
 
 ;;; Commentary:
 
-;; Single package bundling native chat clients for Pi, DSH and
-;; Claude Code with a cross-agent session hub.  See HANDOFF.md.
+;; Single package bundling native chat clients for Pi, Claude Code, DSH,
+;; Codex and Hermes with a cross-agent session hub.  See README.md.
 
 ;;; Code:
 

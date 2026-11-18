@@ -76,6 +76,12 @@ RESULT has :ok, :value, :warnings, :seconds and, on failure, :error.")
     (let ((print-length nil) (print-level nil) (print-escape-newlines t))
       (prin1 result))))
 
+(defun agent-dash-history--deliver (callback &rest args)
+  "Call CALLBACK with ARGS without blocking other history consumers on error."
+  (condition-case err
+      (apply callback args)
+    (error (message "agent-dash history callback failed: %s" (error-message-string err)))))
+
 (defun agent-dash-history--finish (process result)
   "Release PROCESS and deliver RESULT exactly once."
   (let ((key (process-get process 'agent-dash-key)))
@@ -89,9 +95,12 @@ RESULT has :ok, :value, :warnings, :seconds and, on failure, :error.")
       (when (eq (cadr key) 'sessions)
         (when (plist-get result :ok)
           (puthash (car key) (float-time) agent-dash-history--completed))
-        (run-hook-with-args 'agent-dash-history-update-hook (car key) result))
+        (run-hook-wrapped 'agent-dash-history-update-hook
+                          (lambda (callback)
+                            (agent-dash-history--deliver callback (car key) result)
+                            nil)))
       (dolist (callback (nreverse (process-get process 'agent-dash-callbacks)))
-        (funcall callback result)))))
+        (agent-dash-history--deliver callback result)))))
 
 (defun agent-dash-history--sentinel (process _event)
   "Collect the completed reader PROCESS without blocking."

@@ -26,7 +26,7 @@
                     layout prefix summary (cadr texts) "已生成"))
              (gap (text-property-not-all 0 (length line) 'display nil line))
              (next-gap (and gap (text-property-not-all
-                                (+ gap 3) (length line) 'display nil line))))
+                                 (+ gap 3) (length line) 'display nil line))))
         (should gap)
         (should next-gap)
         (should (equal (get-text-property gap 'display line)
@@ -384,8 +384,8 @@
              ((symbol-function 'completing-read)
               (lambda (_prompt table &rest _)
                 (let* ((candidate (seq-find (lambda (item)
-                                             (string-search agent-dash-hub-test-beta item))
-                                           (all-completions "" table)))
+                                              (string-search agent-dash-hub-test-beta item))
+                                            (all-completions "" table)))
                        (line (get-text-property 0 'display candidate))
                        (group (completion-metadata-get
                                (completion-metadata "" table nil) 'group-function))
@@ -589,33 +589,17 @@
      (should (equal (agent-dash-summary-text row) "修复解析器并已推送。"))
      (should (file-exists-p agent-dash-summary-cache-file)))))
 
-(ert-deftest agent-dash-hub-test-import-ashub-summaries ()
+(ert-deftest agent-dash-hub-test-summary-register-preserves-cache ()
   (agent-dash-hub-test-with-hub
-   (let ((hub (get-buffer-create "*ashub*"))
-         (orig-featurep (symbol-function 'featurep)))
-     (unwind-protect
-         (cl-letf (((symbol-function 'featurep)
-                    (lambda (f &rest r) (or (eq f 'ashub-summary) (apply orig-featurep f r))))
-                   ((symbol-function 'ashub--all-sessions)
-                    (lambda () '((fake "s1-aaaaaaaa" current) (fake "s2-bbbbbbbb" stale)
-                                 (fake "gone" current))))
-                   ((symbol-function 'ashub-session-agent) #'car)
-                   ((symbol-function 'ashub-session-id) #'cadr)
-                   ((symbol-function 'ashub-summary--stamp) (lambda (_) "now"))
-                   ((symbol-function 'ashub-summary-entry)
-                    (lambda (s) (list :summary (format "摘要 %s" (cadr s))
-                                      :checked-stamp (if (eq (nth 2 s) 'current) "now" "old")))))
-           (should (= 3 (agent-dash-summary-import-ashub)))
-           (let ((rows (agent-dash-hub--all)))
-             (cl-flet ((row (id) (seq-find (lambda (r) (equal (plist-get r :id) id)) rows)))
-               ;; Current in ashub: generated, nothing to request.
-               (should (equal (agent-dash-summary-status (row "s1-aaaaaaaa")) "已生成"))
-               ;; Stale in ashub: shown, but refreshed later.
-               (should (equal (agent-dash-summary-status (row "s2-bbbbbbbb")) "待更新"))
-               (should (equal (agent-dash-summary-text (row "s2-bbbbbbbb")) "摘要 s2-bbbbbbbb"))))
-           ;; A second import keeps what is already here.
-           (should (= 0 (agent-dash-summary-import-ashub))))
-       (kill-buffer hub)))))
+   (let* ((row (car (agent-dash-hub--all)))
+          (updated (plist-put (copy-sequence row) :time 1))
+          (entry (list :summary "修复解析器。" :stamp (agent-dash-summary--stamp row))))
+     (puthash (agent-dash-summary-key row) entry agent-dash-summary--cache)
+     (agent-dash-summary-register (list updated))
+     (should (eq updated (gethash (agent-dash-summary-key row) agent-dash-summary--sessions)))
+     (should (eq entry (agent-dash-summary-entry updated)))
+     (should (equal (agent-dash-summary-text updated) "修复解析器。"))
+     (should (equal (agent-dash-summary-status updated) "待更新")))))
 
 (ert-deftest agent-dash-hub-test-semantic-search ()
   (agent-dash-hub-test-with-hub

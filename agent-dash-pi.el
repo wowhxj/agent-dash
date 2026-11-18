@@ -135,7 +135,7 @@
       ("compactionSummary"
        (agent-dash-emit session (list :type 'notice :id (concat "c" id)
                                       :text "earlier context compacted")))
-      ;; ponytail: bashExecution, custom and branchSummary are not shown.
+      ;; bashExecution, custom and branchSummary are not shown.
       (_ nil))))
 
 (defun agent-dash-pi--stream (session update)
@@ -221,7 +221,7 @@
                               :status (ansi-color-filter-apply
                                        (or (agent-dash-jget record "statusText") "")))))
       ("setTitle" (agent-dash-emit session (list :type 'meta :title title)))
-      ;; ponytail: widgets and set_editor_text are not shown.
+      ;; widgets and set_editor_text are not shown.
       (_ nil))))
 
 (defun agent-dash-pi--record (session record)
@@ -643,12 +643,11 @@ Never kill a busy/unsaved session or launch before the old holder has exited."
 
 (defun agent-dash-pi--session-info (file)
   "Return the session plist of Pi session FILE, or nil if it is not one."
-  ;; ponytail: the first prompt is looked for in the first 256 KiB only.
   (let* ((head (agent-dash-file-lines file (* 256 1024)))
          (header (and head (agent-dash-json-read (car head)))))
     (when (equal (agent-dash-jget header "type") "session")
       (let* ((id (agent-dash-jget header "id"))
-             (first (seq-some #'agent-dash-pi--user-entry (cdr head)))
+             (first (agent-dash-file-find-first file #'agent-dash-pi--user-entry))
              (last (agent-dash-file-find-last file #'agent-dash-pi--user-entry))
              (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
         (list :id id :root (agent-dash-jget header "cwd") :file file

@@ -116,7 +116,7 @@
                                                (agent-dash-jget item "status")))))
       ("contextCompaction"
        (agent-dash-emit session (list :type 'notice :id id :text "earlier context compacted")))
-      ;; ponytail: plans, web searches and subagents are not shown.
+      ;; plans, web searches and subagents are not shown.
       (_ nil))))
 
 (defun agent-dash-codex--thread (session thread)

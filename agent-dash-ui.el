@@ -429,7 +429,7 @@ visibility choices survive intermediate updates, but not the finish transition."
                 (when (numberp cost) (format "$%.4f" cost))))))
 
 (defun agent-dash--header ()
-  "Align cached statistics left and model right, as in emacs-pi.
+  "Align cached statistics left and model right.
 Redisplay never issues requests.  Run state belongs only in the mode line."
   (when-let* ((s agent-dash--session))
     (let* ((meta (agent-dash-session-meta s))

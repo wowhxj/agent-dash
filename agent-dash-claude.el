@@ -66,7 +66,7 @@ CALLBACK, if non-nil, receives the response."
               (agent-dash-jget event "isCompactSummary"))
     (let* ((content (agent-dash-jget event "message" "content"))
            (text (agent-dash-json-text content)))
-      ;; ponytail: "<" also drops a real prompt that starts with a tag; it is
+      ;; "<" also drops a real prompt that starts with a tag; it is
       ;; how Claude Code marks command output and injected reminders.
       (cond ((and (not (string-blank-p text)) (not (string-prefix-p "<" text))) text)
             ((agent-dash-images-from-blocks content)
@@ -208,7 +208,7 @@ CALLBACK, if non-nil, receives the response."
   (let ((uuid (agent-dash-jget e "uuid"))
         (seen (agent-dash-claude--table session :seen)))
     (unless (or (and uuid (gethash uuid seen))
-                ;; ponytail: subagent activity is not shown.
+                ;; subagent activity is not shown.
                 (stringp (agent-dash-jget e "parent_tool_use_id")))
       (when uuid (puthash uuid t seen))
       (pcase (agent-dash-jget e "type")
@@ -426,10 +426,8 @@ Recover the startup record for sessions opened before this feature loaded."
 
 (defun agent-dash-claude--session-info (file)
   "Return the session plist of transcript FILE."
-  ;; ponytail: the first prompt is looked for in the first 256 KiB only.
   (let* ((id (file-name-base file))
-         (first (seq-some #'agent-dash-claude--prompt-event
-                          (agent-dash-file-lines file (* 256 1024))))
+         (first (agent-dash-file-find-first file #'agent-dash-claude--prompt-event))
          (last (agent-dash-file-find-last file #'agent-dash-claude--prompt-event))
          (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
     (list :id id :file file

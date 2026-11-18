@@ -55,6 +55,72 @@
           (should (= (length (agent-dash-backend-sessions 'pi nil)) 3)))
       (delete-directory base t))))
 
+(ert-deftest agent-dash-history-test-find-first-stops-at-first-window ()
+  "Do not read a large tool-heavy session in full when its first prompt is early."
+  (let ((file (make-temp-file "dash-first-window-"))
+        (reader (symbol-function 'agent-dash-file-lines))
+        limits)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "header\nfirst\n" (make-string (* 3 1024 1024) ?x) "\nlast\n"))
+          (cl-letf (((symbol-function 'agent-dash-file-lines)
+                     (lambda (path &optional limit)
+                       (push limit limits)
+                       (funcall reader path limit))))
+            (should (equal (agent-dash-file-find-first
+                            file (lambda (line) (and (equal line "first") line)))
+                           "first")))
+          (should (equal limits (list (* 256 1024)))))
+      (delete-file file))))
+
+(ert-deftest agent-dash-history-test-find-first-ignores-unfinished-records ()
+  "An empty file or unfinished final record has no complete match."
+  (let ((file (make-temp-file "dash-first-incomplete-")))
+    (unwind-protect
+        (progn
+          (should-not (agent-dash-file-find-first file #'identity))
+          (with-temp-file file (insert "header\npartial"))
+          (should-not (agent-dash-file-find-first
+                       file (lambda (line) (and (equal line "partial") line))))
+          (should (equal (agent-dash-file-find-first file #'identity) "header")))
+      (delete-file file))))
+
+(ert-deftest agent-dash-history-test-first-prompts-beyond-initial-window ()
+  "Large setup records and large user messages must not hide the first prompt."
+  (dolist (backend '(pi claude))
+    (dolist (large '(setup prompt))
+      (let ((file (make-temp-file "dash-first-prompt-" nil ".jsonl"))
+            (first (concat "首条用户消息"
+                           (when (eq large 'prompt) (make-string (* 300 1024) ?x))))
+            (last "第二条用户消息")
+            (agent-dash-summary--cache (make-hash-table :test #'equal))
+            (agent-dash-summary--loaded t))
+        (unwind-protect
+            (progn
+              (with-temp-file file
+                (when (eq backend 'pi)
+                  (insert "{\"type\":\"session\",\"id\":\"first-prompt-test\",\"cwd\":\"/tmp/project\"}\n"))
+                (when (eq large 'setup)
+                  (insert (json-encode
+                           (list :type "message" :message
+                                 (list :role "system" :content (make-string (* 800 1024) ?x))))
+                          "\n"))
+                (dolist (text (list first last))
+                  (insert (json-encode
+                           (list :type (if (eq backend 'pi) "message" "user")
+                                 :cwd "/tmp/project" :timestamp "2026-01-01T00:00:00Z"
+                                 :message (list :role "user" :content text)))
+                          "\n")))
+              (let ((row (funcall (if (eq backend 'pi) #'agent-dash-pi--session-info
+                                    #'agent-dash-claude--session-info)
+                                  file)))
+                (should (equal (plist-get row :first) first))
+                (should (equal (plist-get row :last) last))
+                (should-not (plist-get row :empty))
+                (should (equal (agent-dash-hub--summary-text row) first))))
+          (delete-file file))))))
+
 (ert-deftest agent-dash-history-test-codex-last-prompt-compressed-and-plain ()
   (unless (executable-find "zstd") (ert-skip "zstd is not installed"))
   (let* ((base (make-temp-file "dash-rollout-" t))
