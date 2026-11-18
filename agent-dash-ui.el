@@ -34,8 +34,12 @@
   "Face for the compact agent activity indicator.")
 (defface agent-dash-process-face '((t :inherit shadow))
   "Face for tool and thinking lines.")
-(defface agent-dash-separator-face '((t :inherit shadow))
-  "Face for the line above the composer.")
+(defface agent-dash-separator-face
+  '((t :inherit mode-line-inactive :weight bold :overline t :extend t))
+  "Face for the full-width heading band above the composer.")
+(defface agent-dash-input-hint-face
+  '((t :inherit agent-dash-separator-face :weight normal))
+  "Face for shortcut hints within the composer heading band.")
 
 (defcustom agent-dash-auto-answer t
   "Open pending agent dialogs in the minibuffer for the selected chat.
@@ -560,7 +564,6 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
             default-directory (agent-dash-session-root session))
       (let ((inhibit-read-only t))
         (insert (propertize agent-dash--composer-separator
-                            'face 'agent-dash-separator-face
                             'read-only t 'front-sticky '(read-only) 'rear-nonsticky t)))
       (setq agent-dash--transcript-end (copy-marker (point-min) t)
             agent-dash--input-start (copy-marker (point-max)))
@@ -580,11 +583,13 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                      (overlay-start agent-dash--input-heading-overlay)
                      (overlay-end agent-dash--input-heading-overlay)))
            (hint (seq-find
-                  (lambda (text) (<= (+ (string-width heading) (string-width text)) width))
+                  (lambda (text) (<= (+ (string-width heading) (string-width text) 1) width))
                   '("  RET 发送 · Shift-RET 换行 · TAB 补全 / 和 @"
                     "  RET 发送 · TAB 补全" ""))))
       (overlay-put agent-dash--input-heading-overlay 'after-string
-                   (propertize hint 'face 'shadow)))))
+                   (concat (propertize hint 'face 'agent-dash-input-hint-face)
+                           (propertize " " 'face 'agent-dash-separator-face
+                                       'display '(space :align-to right)))))))
 
 (defun agent-dash--decorate-input ()
   "Decorate the composer without changing its text or prompt history."
@@ -611,6 +616,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (when (> (- agent-dash--input-start agent-dash--transcript-end) 2)
     (setq agent-dash--input-heading-overlay
           (make-overlay (1+ agent-dash--transcript-end) (1- agent-dash--input-start)))
+    (overlay-put agent-dash--input-heading-overlay 'face 'agent-dash-separator-face)
     (agent-dash--resize-input-hints nil)
     (add-hook 'window-size-change-functions #'agent-dash--resize-input-hints nil t))
   ;; Keep the editable start free of before-strings, including IME preedit.
@@ -639,7 +645,6 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
       (plist-put item :process-group nil))
     (erase-buffer)
     (insert (propertize agent-dash--composer-separator
-                        'face 'agent-dash-separator-face
                         'read-only t 'front-sticky '(read-only) 'rear-nonsticky t))
     (setq agent-dash--transcript-end (copy-marker (point-min) t)
           agent-dash--input-start (copy-marker (point-max)))
