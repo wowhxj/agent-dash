@@ -22,8 +22,14 @@
   "Lines of tool output shown when a tool item is expanded."
   :type 'integer)
 
-(defface agent-dash-user-face '((t :inherit highlight :weight bold :extend t))
-  "Face for a user turn, extended across the window.")
+(defcustom agent-dash-show-pinned-prompt t
+  "Whether to show the latest user prompt above the conversation.
+To apply a change to an open chat, run `agent-dash-refresh-chat'."
+  :type 'boolean)
+
+(defface agent-dash-user-face
+  '((t :inherit widget-field :box nil :underline nil :extend t))
+  "Subtle background distinguishing user turns from agent replies.")
 (defface agent-dash-input-face
   '((t :underline nil))
   "Face for the editable composer, leaving its background and selection alone.")
@@ -35,12 +41,8 @@
 (defface agent-dash-process-face '((t :inherit shadow))
   "Face for tool and thinking lines.")
 (defface agent-dash-separator-face
-  '((t :inherit mode-line-inactive :weight bold
-        :box nil :overline nil :underline nil :extend t))
-  "Face for the full-width heading band above the composer.")
-(defface agent-dash-input-hint-face
-  '((t :inherit agent-dash-separator-face :weight normal))
-  "Face for shortcut hints within the composer heading band.")
+  '((t :inherit default :inverse-video t :weight bold :extend nil))
+  "Face for the short input label above the composer.")
 
 (defcustom agent-dash-auto-answer t
   "Open pending agent dialogs in the minibuffer for the selected chat.
@@ -125,11 +127,11 @@ Details stay folded until explicitly opened by the user."
                         (let* ((text (plist-get item :text))
                                (cut (string-search agent-dash-reference-boundary text)))
                           (if cut (substring text 0 cut) text))
-                        (if (plist-get item :images)
-                            (format " [%d image(s)]" (length (plist-get item :images)))
-                          "") "\n"
-                        (agent-dash-images-string (plist-get item :images)))
-                'face 'agent-dash-user-face)))
+                        (when (plist-get item :images)
+                          (format " [%d image(s)]" (length (plist-get item :images))))
+                        "\n")
+                'face 'agent-dash-user-face)
+               (agent-dash-images-string (plist-get item :images))))
       ('assistant
        (let ((thinking (plist-get item :thinking))
              (text (or (plist-get item :text) "")))
@@ -488,14 +490,16 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
               (item (seq-find (lambda (i) (eq (plist-get i :type) 'user))
                               (reverse (agent-dash-session-items s)))))
     (let* ((text (plist-get item :text))
-           (cut (string-search agent-dash-reference-boundary text)))
-      (propertize
-       (string-replace
-        "%" "%%"
-        (concat " You: "
-                (agent-dash--one-line (if cut (substring text 0 cut) text)
-                                      (max 10 (- (window-body-width) 8)))))
-       'face 'agent-dash-input-face))))
+           (cut (string-search agent-dash-reference-boundary text))
+           (prompt (if cut (substring text 0 cut) text))
+           (label " 最近请求：")
+           (preview (agent-dash--one-line
+                     (if (and (string-blank-p prompt) (plist-get item :images))
+                         (format "[%d 张图片]" (length (plist-get item :images)))
+                       prompt)
+                     (max 1 (- (window-body-width) (string-width label))))))
+      (concat (propertize label 'face 'bold)
+              (propertize (string-replace "%" "%%" preview) 'help-echo prompt)))))
 
 ;;;; Buffer
 
@@ -535,7 +539,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
 \\{agent-dash-mode-map}"
   (agent-dash--install-status-line)
   (setq-local tab-line-format '(:eval (agent-dash--header)))
-  (setq-local header-line-format '(:eval (agent-dash--pinned-prompt)))
+  (setq-local header-line-format
+              (and agent-dash-show-pinned-prompt '(:eval (agent-dash--pinned-prompt))))
   (add-to-invisibility-spec 'agent-dash-process)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
@@ -584,13 +589,11 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                      (overlay-start agent-dash--input-heading-overlay)
                      (overlay-end agent-dash--input-heading-overlay)))
            (hint (seq-find
-                  (lambda (text) (<= (+ (string-width heading) (string-width text) 1) width))
-                  '("  RET 发送 · Shift-RET 换行 · TAB 补全 / 和 @"
-                    "  RET 发送 · TAB 补全" ""))))
+                  (lambda (text) (<= (+ (string-width heading) (string-width text)) width))
+                  '("  ────  RET 发送 · Shift-RET 换行 · TAB 补全 / 和 @"
+                    "  ────  RET 发送 · TAB 补全" "  ────" ""))))
       (overlay-put agent-dash--input-heading-overlay 'after-string
-                   (concat (propertize hint 'face 'agent-dash-input-hint-face)
-                           (propertize " " 'face 'agent-dash-separator-face
-                                       'display '(space :align-to right)))))))
+                   (and hint (propertize hint 'face 'shadow))))))
 
 (defun agent-dash--decorate-input ()
   "Decorate the composer without changing its text or prompt history."
@@ -644,7 +647,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (setq agent-dash--transcript-end (copy-marker (point-min) t)
           agent-dash--input-start (copy-marker (point-max)))
     (setq-local tab-line-format '(:eval (agent-dash--header)))
-    (setq-local header-line-format '(:eval (agent-dash--pinned-prompt)))
+    (setq-local header-line-format
+                (and agent-dash-show-pinned-prompt '(:eval (agent-dash--pinned-prompt))))
     (agent-dash--install-status-line)
     (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t)
     (add-to-invisibility-spec 'agent-dash-process)
