@@ -94,8 +94,7 @@
      (should (equal (agent-dash--input) "draft"))
      (should (= (point) (+ agent-dash--input-start 2)))
      (should (string-search "tiny.png" (overlay-get agent-dash--attachment-overlay 'before-string)))
-     (should (get-text-property 0 'cursor
-                                (overlay-get agent-dash--input-overlay 'after-string)))
+     (should-not (overlay-get agent-dash--input-overlay 'after-string))
      (agent-dash-emit session '(:type assistant :id "bg" :text "background"))
      (agent-dash-refresh-chat)
      (should (equal (agent-dash--input) "draft"))

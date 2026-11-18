@@ -54,7 +54,7 @@
      (should-not (overlay-get agent-dash--input-overlay 'before-string))
      (should (equal (buffer-substring-no-properties
                      agent-dash--transcript-end agent-dash--input-start)
-                    "\n── 输入消息 ──\n"))
+                    "\n 输入消息 \n"))
      (should-error (delete-backward-char 1) :type 'text-read-only)
      (insert "新增 ")
      (should (equal (agent-dash--input) (concat "新增 " draft)))
@@ -91,30 +91,30 @@
          (should-not (get-text-property agent-dash--transcript-end 'face))
          (should-not (overlay-get agent-dash--input-overlay 'before-string))
          (should (< (overlay-end heading) agent-dash--input-start))
-         (should (<= (+ (string-width "── 输入消息 ──") (string-width hint)) width))
+         (should (<= (+ (string-width " 输入消息 ") (string-width hint)) width))
          (when (>= width 80)
            (should (string-search "Shift-RET" hint))
            (should (string-search "TAB" hint))))))
-   (should (face-attribute 'agent-dash-separator-face :overline nil t))
+   (dolist (attribute '(:box :overline :underline))
+     (should-not (face-attribute 'agent-dash-separator-face attribute nil t)))
    (should (face-attribute 'agent-dash-separator-face :extend nil t))
    (should (eq (face-attribute 'agent-dash-separator-face :inherit)
                'mode-line-inactive))
    (should (equal (agent-dash--input) "draft"))))
 
-(ert-deftest agent-dash-ui-test-composer-full-line-background ()
-  "Fill empty and multiline composers to the edge without modifying drafts."
+(ert-deftest agent-dash-ui-test-composer-preserves-selection-background ()
+  "Leave selection backgrounds and native cursor display free of decoration."
   (agent-dash-ui-test-with-chat
    (dolist (draft '("" "short" "first line\nsecond line" ""))
      (agent-dash--set-input draft)
      (agent-dash-emit session '(:type assistant :id "a" :text "background output"))
-     (let ((fill (overlay-get agent-dash--input-overlay 'after-string)))
-       (should (equal fill " "))
-       (should (equal (get-text-property 0 'display fill)
-                      '(space :align-to right)))
-       (should (eq (get-text-property 0 'face fill) 'agent-dash-input-face))
-       (should (eq (get-text-property 0 'cursor fill) t))
-       (should (face-attribute 'agent-dash-input-face :extend nil t))
-       (should-not (face-attribute 'agent-dash-input-face :underline nil t)))
+     (should-not (overlay-get agent-dash--input-overlay 'before-string))
+     (should-not (overlay-get agent-dash--input-overlay 'after-string))
+     (dolist (attribute '(:background :foreground :inherit :extend))
+       (should (eq (face-attribute 'agent-dash-input-face attribute) 'unspecified)))
+     (should-not (face-attribute 'agent-dash-input-face :underline nil t))
+     (should-not (text-property-not-all agent-dash--input-start (point-max)
+                                      'face nil))
      (should (= (overlay-end agent-dash--input-overlay) (point-max)))
      (should (equal (agent-dash--input) draft)))
    (agent-dash--set-input "send exactly this")
@@ -163,8 +163,7 @@
    (agent-dash-refresh-chat)
    (should (= (point) (+ agent-dash--input-start 4)))
    (should (equal (agent-dash--input) "aiiibc"))
-   (should (get-text-property
-            0 'cursor (overlay-get agent-dash--input-overlay 'after-string)))))
+   (should-not (overlay-get agent-dash--input-overlay 'after-string))))
 
 (ert-deftest agent-dash-ui-test-process-group-growth-and-toggle ()
   "Process groups stay folded while growing, without hiding final answers."
@@ -364,20 +363,15 @@
               (should-not (string-search "test-model" (agent-dash--mode-line)))
               (should-not (face-attribute 'agent-dash-input-face :underline nil t))
               (should (eq (face-attribute 'agent-dash-input-face :inherit)
-                          'widget-field))
+                          'unspecified))
               (should (equal (overlay-get agent-dash--input-overlay 'before-string)
                              nil))
-              (should (get-text-property
-                       0 'cursor (overlay-get agent-dash--input-overlay 'after-string)))
+              (should-not (overlay-get agent-dash--input-overlay 'after-string))
               (goto-char (point-max))
               (insert "draft")
               (agent-dash-refresh-chat)
               (should (equal (agent-dash--input) "draft"))
-              (should (equal
-                       (get-text-property
-                        0 'display
-                        (overlay-get agent-dash--input-overlay 'after-string))
-                       '(space :align-to right))))
+              (should-not (overlay-get agent-dash--input-overlay 'after-string)))
           (with-current-buffer buffer
             (let ((agent-dash--quitting t)) (kill-buffer))))))))
 

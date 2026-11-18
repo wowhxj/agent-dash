@@ -25,8 +25,8 @@
 (defface agent-dash-user-face '((t :inherit highlight :weight bold :extend t))
   "Face for a user turn, extended across the window.")
 (defface agent-dash-input-face
-  '((t :inherit widget-field :underline nil :extend t))
-  "Face for the editable composer.")
+  '((t :underline nil))
+  "Face for the editable composer, leaving its background and selection alone.")
 (defface agent-dash-assistant-face
   '((t :inherit font-lock-function-name-face :weight bold))
   "Face for the assistant label.")
@@ -35,7 +35,8 @@
 (defface agent-dash-process-face '((t :inherit shadow))
   "Face for tool and thinking lines.")
 (defface agent-dash-separator-face
-  '((t :inherit mode-line-inactive :weight bold :overline t :extend t))
+  '((t :inherit mode-line-inactive :weight bold
+        :box nil :overline nil :underline nil :extend t))
   "Face for the full-width heading band above the composer.")
 (defface agent-dash-input-hint-face
   '((t :inherit agent-dash-separator-face :weight normal))
@@ -61,7 +62,7 @@ Other chats keep their requests visible until selected or answered with
 (defvar-local agent-dash--input-overlay nil "Overlay decorating the composer.")
 (defvar-local agent-dash--input-heading-overlay nil
   "Overlay adding shortcut hints to the protected composer heading.")
-(defconst agent-dash--composer-separator "\n── 输入消息 ──\n"
+(defconst agent-dash--composer-separator "\n 输入消息 \n"
   "Read-only heading on a separate physical line above the editable draft.")
 (defvar-local agent-dash--attachment-overlay nil
   "Overlay showing staged images on the separator before the composer.")
@@ -618,13 +619,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
           (make-overlay (1+ agent-dash--transcript-end) (1- agent-dash--input-start)))
     (overlay-put agent-dash--input-heading-overlay 'face 'agent-dash-separator-face)
     (agent-dash--resize-input-hints nil)
-    (add-hook 'window-size-change-functions #'agent-dash--resize-input-hints nil t))
-  ;; Keep the editable start free of before-strings, including IME preedit.
-  ;; Fill empty composers to the window edge without padding the draft.
-  ;; Anchor the cursor before the display-only fill, not after it.
-  (overlay-put agent-dash--input-overlay 'after-string
-               (propertize " " 'face 'agent-dash-input-face 'cursor t
-                           'display '(space :align-to right))))
+    (add-hook 'window-size-change-functions #'agent-dash--resize-input-hints nil t)))
 
 (defun agent-dash-refresh-chat ()
   "Rebuild this chat's presentation without restarting its agent or losing drafts."
