@@ -2,187 +2,98 @@
 
 [English](README.md) | 简体中文
 
-在 Emacs 中直接与编码 Agent 对话，并在一处浏览所有 Agent 的会话。单一包，内置全部后端：
-
-| 后端 | 运行方式 | `C-c C-q` |
-|---|---|---|
-| Pi | `pi --mode rpc`，后台 holder | 确认后结束实例 |
-| Claude Code | `claude -p` stream-json，后台 holder | 确认后结束实例 |
-| Codex | `codex app-server`，后台 holder | 确认后结束实例 |
-| Hermes | `hermes acp`，后台 holder | 确认后结束实例 |
-| DSH | 本机 DSH Host（Desktop bridge，或后台 holder 托管的 `dsh web`） | 只关闭界面 |
-
-关闭聊天 buffer 或退出 Emacs 都不会停止 Agent；再次打开该会话时会重新接上同一个运行中的实例。设计说明见 [docs/DESIGN.md](docs/DESIGN.md)。
+在 Emacs 中与 **Pi、Claude Code、Codex、DeepSeek Harness（DSH）和 Hermes** 原生对话，并用统一的 Hub 浏览和恢复历史会话。所有后端均已内置，只需安装自己使用的 Agent CLI。
 
 ## 安装
 
-依赖：Emacs 29.1+、`markdown-mode`、`websocket`、`transient`，以及要使用的那几个 Agent CLI。已在 macOS 上验证，Windows 不支持（依赖 FIFO 和 POSIX 进程）。
+需要 Emacs 29.1+、macOS 或 GNU/Linux，以及 `markdown-mode`、`websocket`、`transient`（0.7+）。请先安装并登录 Agent CLI，确保 Emacs 能通过 `exec-path` 找到它。浏览 Codex 和 Hermes 历史还需要 `sqlite3`。
+
+使用支持 `:vc` 的 `use-package`：
 
 ```elisp
 (use-package agent-dash
-  :vc (:url "https://github.com/wowhxj/agent-dash" :rev :newest)
-  :commands (agent-dash agent-dash-hub))
+  :vc (:url "https://github.com/wowhxj/agent-dash")
+  :commands (agent-dash agent-dash-hub)
+  :init
+  ;; 可选：关闭默认启用的后台摘要调度器。
+  (setq agent-dash-summary-enable nil))
 ```
 
-## 使用
+也可以将仓库加入 `load-path` 后执行 `(require 'agent-dash)`。请保留与 Elisp 文件同目录的 `agent-dash-pi-bridge.mjs`，Pi 原生命令需要它。
 
-- `M-x agent-dash`：选择 Agent 和目录，新建会话。
-- `M-x agent-dash-hub`：列出所有 Agent 的会话。
+**后台摘要默认启用**，以上配置示例选择关闭。启用后会将历史用户/助手对话发送到已配置的 gptel 模型，可能产生费用，详见[摘要与隐私](#摘要与隐私)。
 
-DSH 新建会话默认使用 `auto` 权限；恢复已有会话时保留原权限。
-可通过 `agent-dash-dsh-permission` 修改默认值，设为 nil 则沿用 Host 默认。
-回复流或提问/审批通道断开时，界面显示 disconnected 并自动重连；重连后刷新最近历史、实际运行状态和 Host 尚未回答的问题，不重发用户 prompt。
+## 开始使用
 
-### 聊天 buffer
+- `M-x agent-dash`：选择 Agent 和工作目录。
+- `M-x agent-dash-hub`：浏览各 Agent 的历史；`RET` 打开或恢复会话，`N` 新建。
 
-历史用户消息用浅底色与 Agent 回复区分，正文只读。底部「输入消息」标签和细分隔线与草稿之间留有一空行。最近请求默认显示在标签正上方，悬停可查看全文；如需隐藏，可关闭 `agent-dash-show-pinned-prompt` 并刷新聊天。工具和纯 thinking 消息按用户回合收进 `Process · N steps`：处理中只自动展开当前 Process 分组，显示精简的步骤摘要；每条 thinking 和工具调用的细节仍默认折叠，按需手动展开。后端确认整轮结束后再折叠 Process，最终答复保持可见。仍可用 `RET`/`TAB` 手动切换整组或单步，流式更新不覆盖手动选择；不会因为收到单条 final 消息就提前折叠仍在运行的任务。
+聊天在后台运行，关闭 buffer 或退出 Emacs 后仍可继续。`C-c C-q` 会在确认后停止 Pi、Claude、Codex 或 Hermes；对 DSH 则只断开连接，Host 会话继续运行。连接丢失时，可从 Hub 重新打开会话。
 
-五个后端共用布局：顶部左侧显示统计，右侧显示 provider/模型和思考等级；底部 mode-line 统一精简为如 `Pi thinking |` 的活动指示器，不重复模型信息。`|/-\` 动效仅在运行时启用，空闲/断开时停止；队列（`[S1 F2]`）和待处理请求（`?1`）只在有内容时显示。详细阶段和操作提示放在悬停提示中。窗口变窄时先隐藏低优先级统计。输入区沿用 emacs-pi 的主题背景，并明确禁用下划线。Pi 显示缓存的上下文占用、会话总 token、缓存读取比例及预估费用（不是账单），在连接后及任务结束时刷新。DSH 从 Host 投影恢复上下文、轮次/步数、解码速度、总 token 和缓存比例，并通过 control 流持续更新；右侧另显示 Agent 预设和权限模式。DSH 的计费桶只各计一次，不虚构费用。其他后端没有的数据不显示。界面重绘不调用 RPC 或模型。活动指示器的悬停提示用 `waiting for model`、`responding` 区分具体阶段，不在底部堆叠长文本。可用 `M-x agent-dash-refresh-chat` 重建已有聊天的显示，不重启 Agent，也不丢弃草稿。
+## 聊天
 
-支持统一的本地图文队列；待发送消息由 agent-dash 托管，后端原生队列单独只读展示。
-
-| 键 | 作用 |
+| 按键 | 操作 |
 |---|---|
-| `RET` / `C-c C-c` | 发送；运行中排队为 follow-up（`RET` 优先回答待处理提问） |
-| `S-RET` | 换行 |
-| `C-c C-s` | 暂存为 steer；打开队列后按 `x` 才应用到当前任务 |
-| `C-c q` | 查看和管理当前会话的图文队列 |
-| `C-c C-k` | 停止当前任务 |
-| `C-c C-q` | 退出（语义见上表） |
-| `C-c C-a` | 手动打开待处理的权限请求或提问（默认也会自动弹出） |
-| `C-c C-r` | 恢复历史会话 |
-| `C-c C-b` | 切换到其他聊天 |
-| `C-c @` | 打开跨 Agent 会话引用选择器 |
-| `/`、`@`、`@session` + `TAB` | 在 minibuffer 中筛选补全（Vertico/Orderless） |
-| `C-u TAB` | 刷新后端命令目录 |
-| 非输入区按 `i` / 任意位置 `C-c C-i` | 回到输入区末尾（输入区内 `i` 仍正常输入） |
-| `M-p` / `M-n` | 浏览已发送的输入 |
-| `TAB` / `RET`（在工具或 thinking 行上） | 折叠 / 展开 |
-| `M-x agent-dash-select-model` | 切换模型 |
+| `RET` / `Shift-RET` | 发送 / 换行 |
+| `TAB` | 输入区补全 `/` 命令和 `@` 会话引用；其他位置展开或折叠条目 |
+| `M-p` / `M-n` | 上一条 / 下一条输入 |
+| `C-c C-k` | 中断当前任务 |
+| `C-c C-s` | 暂存引导消息，在队列中确认交付 |
+| `C-c C-i` | 聚焦输入区 |
+| `C-c C-f` / `C-c C-v` | 添加图片文件 / 剪贴板图片 |
+| `C-c C-d` | 移除草稿图片 |
+| `C-c C-o` | 打开附件或收到的图片 |
+| `C-c q` | 打开队列编辑器 |
+| `C-c C-a` | 回答待处理请求 |
+| `C-c C-q` | 停止或断开 |
 
-### 完成提醒
+可用 `M-x agent-dash-select-model` 切换模型，需后端支持。`@` 引用会将历史用户/助手对话插入待发送消息。`/` 补全列出当前后端可用命令；Pi 还支持登录、登出、重载等原生命令，这些操作不会发送给模型。
 
-默认启用自适应提醒：正在选中的聊天且 Emacs 有焦点时不打扰；在 Emacs 的其他 buffer 工作时通过 echo area 提示；切到其他应用时发送系统通知。桌面通知先加载内置 `notifications`，再优先调用用户配置的 `notify-send`，兼容 `use-package notifications :commands notify-send :config ...` 的延迟加载。macOS 可沿用个人配置中通过 `terminal-notifier` 发送的封装；其他平台可将 `notify-send` 别名到 `notifications-notify`。agent-dash 不重定义用户函数，也不再自行调用 AppleScript。未配置 `notify-send` 时回退到内置 `notifications-notify`（需要可用的 D-Bus 通知服务；macOS 用户需配置封装）。
+任务运行中，普通发送进入本地 follow-up 队列。消息交付前可查看、排序、编辑或删除；交付后不能撤回。引导消息需在队列中明确确认交付；不支持 steer 的后端会转为 follow-up。**队列不会在 Emacs 重启后保留。**
 
-macOS 的 `terminal-notifier` 可通过 `brew install terminal-notifier` 安装，并须在 Emacs 的 `exec-path` 中可见。通知的 `-group Emacs`、`-activate org.gnu.Emacs` 等行为由个人 `notify-send` 封装控制。发送时同步报错或返回 nil，会回退到 echo area；异步封装返回进程只表示启动成功，不检测后续进程退出状态。系统权限或勿扰模式仍可能屏蔽通知，发送接口无法确认用户是否实际看见。
+图片支持 PNG、JPEG、GIF 和 WebP。选择文件不依赖剪贴板工具；粘贴图片需要 macOS 的 `pngpaste`，或 Linux 的 `wl-paste` / `xclip`。后端不支持图片时会明确拒绝，不会静默丢弃附件。
 
-提醒仅包含 Agent、项目目录名、短会话 ID，以及 `Run ended` / `Run failed`，不包含对话正文；“本轮结束”不代表整个任务成功完成。历史回放、重连快照、主动取消和断线不发完成提醒；自动 follow-up 连续执行时合并到暂时结束后再提醒。Emacs 内已有 minibuffer 交互时延迟 echo area 提示，不抢占输入；切到其他应用后不因此延迟系统通知。只监控当前 Emacs 中已连接的聊天，关闭聊天或退出 Emacs 后不继续通知。
+## 会话 Hub
 
-全局 mode-line 通过标准 `global-mode-string` 显示精简的 `?1 ✓2`：`?1` 以 `warning` 高亮，表示 1 个会话等待权限确认、选择或回答；`✓2` 表示 2 个会话有尚未查看的本轮结束结果。按会话数统计，某项为零就隐藏，两项都为零时完全隐藏。点击对应计数跳到该类会话；重复点击待确认项可轮流查看。切到聊天且 Emacs 有焦点后清除其未读完成标记，待确认项只有回答、取消或后端撤回后才清除，不因查看而消失。通知弹出后未读完成标记仍保留。使用完全自定义 mode-line 的用户需保留 `global-mode-string`，否则全局计数无法显示。
+【摘要】列优先显示 AI 摘要，没有摘要时显示首条用户消息；末条用户消息单独显示。会话有新活动后，按 `g` 刷新。
 
-设置 `(setq agent-dash-notify nil)` 关闭瞬时提醒和全局双计数，现有会话 modeline 活动状态不受影响。终端无法确定焦点时按仍在 Emacs 内处理，不猜测用户已经切走。
-
-### 图文队列
-
-运行中按 `RET` / `C-c C-c` 会将文本和全部图片作为一条 follow-up 保存；整轮结束后逐条下发，不因单条 assistant final 就提前启动下一条。`C-c C-s` 只暂存 steer，不立即注入。用 `C-c q` 打开队列：
-
-| 队列键 | 作用 |
+| 按键 | 操作 |
 |---|---|
-| `RET` | 只读查看整条消息及仍保留的图片；也可查看后端原生消息摘要 |
-| `e` / `a` | 编辑选中的待发送消息 / 新建图文消息 |
-| `d` | 删除尚未下发的本地消息 |
-| `n` / `p` | 移动到下一条 / 上一条消息，跳过分组标题 |
-| `M-n` / `M-p` | 向下 / 向上调整顺序；在边界跨 Steer / Follow 分组转换（`M-↓↑` 同样可用） |
-| `f` / `s` | 暂存转换 follow / steer，并暂停自动发送；不立即发送 |
-| `x` | 明确应用选中的一条 steer（必须有正在运行的任务） |
-| `SPC` / `P` / `r` | 切换自动发送 / 暂停 / 继续本地 follow 队列 |
-| `?` | 打开 transient 操作菜单；导航/调序后保持打开，`h` 查看完整说明 |
-| `c` | 将 failed/unknown 的完整图文复制到新草稿；保持暂停，绝不自动重试 |
-| `D` | 确认后清理只读回执；不撤回后端消息 |
-| `o` | 回到所属聊天；断线后先显式重连，再按 `r` 继续 |
+| `RET` / `N` | 打开会话 / 新建会话 |
+| `j` | 搜索所有已载入会话，包括隐藏分组 |
+| `n` / `p` | 下一个 / 上一个可见会话 |
+| `C-c C-n` / `C-c C-p` | 下一个 / 上一个项目 |
+| `TAB` / `Shift-TAB` | 折叠当前 / 全部分组 |
+| `f` / `a` / `P` | 视图筛选 / Agent 筛选 / 项目筛选 |
+| `l` / `c` | 切换仅存活视图 / 重置筛选 |
+| `i` | 查看对话；`m` 切换元数据，`C-c C-w` 复制对话 |
+| `s` | 通过 gptel 进行语义搜索 |
+| `r` / `R` | 生成或更新选中会话摘要 / 重试失败摘要 |
+| `d` / `u` / `x` | 标记 / 取消标记 / 执行历史删除，仅支持 Pi 和 Claude |
+| `!` / `?` / `q` | 诊断 / 帮助 / 返回 |
 
-待发送消息按 **Steer → Follow** 分组，计数与 modeline 的本地 pending 口径一致；交接中、已接收、失败和未知状态的记录独立显示在 **Deliveries · read-only** 区，状态置于行首，已完成的 sent 回执隐藏；图片只显示数量，没有图片时不显示 0。常用快捷键显示在顶部和底部，长篇说明不占据正文，按 `?` 查看完整帮助。`M-n` 将最后一条 steer 移到 Follow 首位，`M-p` 将第一条 follow 移到 Steer 末尾；跨组只暂存转换并暂停发送，不自动注入模型。
+空会话、子代理、归档及其他不摘要会话默认隐藏，按 `f h` 可显示。删除历史不会停止正在运行的 Agent。项目目录移动或缺失时，可用 `D` 选择替代目录，不会改写历史对话。
 
-编辑器与聊天草稿隔离，`C-c C-c` 原子保存文本和图片，`C-c C-q` 取消；图片粘贴、文件添加、移除和预览沿用聊天快捷键。正在编辑的队首不会被自动发送，后面的 follow 也不会越过它。下发后立即变为只读，必须收到关联确认及整轮结束才释放当前交接；失败、连接中断或主动取消会暂停队列，不自动重发。Pi/Codex/DSH 保留其原生 steer 语义，Claude 仍是 interrupt 后提交新输入，Hermes 不支持 steer，转换会明确拒绝。
+## 摘要与隐私
 
-队列仅保存在当前 Emacs 内存：关闭聊天后保留并暂停，可从非聊天 buffer 用 `M-x agent-dash-queue` 找回；**退出 Emacs 会丢弃队列**。默认每会话最多保留 100 条记录、64 MiB 图片 base64；成功发送后仅保留文本与图片数量回执，图片可在聊天历史查看；失败/未知交接保留完整图文。既有后端队列不会被清空、编辑或重建，与其他客户端同时提交时不承诺跨客户端顺序。
+摘要和语义搜索需要已配置的 [gptel](https://github.com/karthink/gptel)；聊天及普通 Hub 浏览不需要。
 
-### 选择与确认
+- 后台摘要处理已关闭且内容稳定 300 秒的会话。长对话可能需要多次模型调用，调度间隔**不是费用上限**。
+- 即使不含工具输出，用户/助手对话仍可能包含隐私。语义搜索也会将本次搜索选择的摘要或对话发送给 gptel。
+- 不希望自动摘要时，请在**加载包之前**设置 `(setq agent-dash-summary-enable nil)`。已启动的调度器需通过 `M-x agent-dash-summary-mode` 关闭。
 
-当前选中的聊天收到提问时，会自动在 minibuffer 中交互，不在进程过滤器内阻塞。后台聊天保留可见的问题卡片和 `?N` 提示，切回后再弹出；已有 minibuffer 操作不会被抢占，草稿也不会丢。设置 `(setq agent-dash-auto-answer nil)` 可改为只通过 `RET` 或 `C-c C-a` 手动回答。
+## 常用设置
 
-- **单选**：补全选择；自由输入问题可填写自定义文本。
-- **多选**：原生多选问题使用逗号分隔补全；Pi 的 `ask_user` RPC 降级交互会逐次展示勾选项，选 **Done** 完成，选 **Other** 自定义输入。批量问题和可选补充说明也会依次弹出。
-- **取消**：在交互中按 `C-g`，向后端返回取消，绝不视为授权。Pi 收到明确取消，Claude 拒绝工具调用，Codex/DSH 返回空问题答案，Hermes 取消权限请求。
-- 确认正文、输入提示和编辑器预填文本会保留；minibuffer 中可用 `C-q C-j` 插入换行。Pi 请求超时或撤回会清理待处理状态，不发送过期答案。
+使用 `M-x customize-group RET agent-dash` 查看全部选项。
 
-### 输入补全
-
-- `/` + `TAB`：共用客户端命令（`/help`、`/new`、`/resume`、`/dash`、`/stop`、`/quit`，支持时还有 `/model`）加后端实际公布的命令/skill。选中后按 `RET` 执行；客户端命令不接收参数，需要选择时打开对应 picker。
-- `@` + `TAB`：补全项目文件，或转到会话引用选择器；含空格的路径会加引号。
-- `@session` + `TAB`：统一跨 Agent、跨项目引用，复用 Hub 默认可见规则。live 会话显示绿色 `●`；单行保留所有列，长字段省略，但完整 Agent、日期、项目、摘要、末句和 ID 仍可多词搜索及悬停查看。发送时沿用已有引用展开逻辑附上对话。
-
-选择器统一走 `completing-read`，沿用当前 Vertico，安装了 Orderless 时仅在 picker 内启用，不修改全局设置。`C-g` 保留草稿；后台输出不会导致替换位置偏移。补全只读目录，不调用模型。Pi 合并本机内置目录与 `get_commands`（见下节）；Claude 读取初始化目录；DSH 读取 Host 命令与注册 skill；Hermes 使用 ACP 公布的命令。Codex 目前提供共用客户端命令，不冒充其 CLI 专有斜杠菜单。DSH Host 命令会展示执行结果，已验证注册的 skill 则作为 prompt 提交。
-
-### Pi 原生命令
-
-Pi 补全采用自身的内置命令（当前验证版本共 24 个）加 RPC 公布的扩展、提示模板与 skills，不混入额外客户端命令名；`/help`、`/dash`、`/stop` 仍可手动输入。`/model provider/model-id`、`/thinking`、`/compact`、`/name`、`/session`、`/copy` 和 HTML `/export` 使用原生 RPC。
-
-`/login [provider-id]`、`/logout [provider-id]` 通过正在运行的 Pi runtime 处理，包含扩展注册的 provider。安装时须将 `agent-dash-pi-bridge.mjs` 与 Elisp 文件一并保留。可选择 provider 和认证方式；所有认证自由文本输入都走 `read-passwd` 遮罩，包括旧 OAuth 接口的 API-key 提示和地址字段。不要在 `/login` 后附加密钥；认证命令不进入输入历史或模型上下文。`C-g` 取消对话，失败不自动重试；授权链接仅显示，不自动打开浏览器或覆盖剪贴板。
-
-加载更新后的 Elisp 后，`/reload` 会先确认，再**重启 Pi 并恢复同一个已保存会话**，不是 Pi 原生热重载。保留聊天 buffer、未发送草稿、模型及思考等级；会话未保存或不可读、任务执行中、有待处理对话或排队消息时拒绝重启，旧进程退出超时也不会启动第二个进程。pi-fast 等扩展的内存开关可能重置，需重新开启。仅关闭聊天 buffer 仍会复用旧进程；也可先 `/quit`，再从 Hub 恢复。
-
-桥接缺失、未知命令均明确拒绝，不回退到模型。`/settings`、`/tree`、`/fork`、`/clone`、`/trust`、`/share` 等终端 UI 专用命令会标记并提示限制，不把“目录一致”冒充“完整实现了终端界面”；`/hotkeys` 显示当前 Emacs 键位。
-
-### 图片
-
-五个后端均通过原生协议发送图片。`C-y` 或 macOS `s-v` 粘贴图片（文本仍正常粘贴），`C-c C-v` 仅粘贴图片，`C-c C-f` 选择本地文件。macOS 图片粘贴使用可选的 `pngpaste`，Linux 使用 `wl-paste` 或 `xclip`；选图不依赖剪贴板工具。
-
-待发送缩略图显示在草稿上方，不混入草稿文字。点击 `× remove` 或按 `C-c C-d` 移除附件，点击图片或按 `C-c C-o` 在 Emacs 查看原图。支持只发图片；执行 `/` 命令前需先移除附件。
-
-按文件内容识别 PNG/JPEG/GIF/WebP，单图客户端上限 10 MiB、最多 10 张，另有总量限制；模型可能有更低限制。本地发送失败保留草稿，Pi/Codex/Hermes 可关联的请求拒绝可恢复没有更新提交时的空草稿；`C-c C-u` 可选择恢复失败或最近的含图草稿，不覆盖新输入，也不自动重发。模型报错前可能已经执行了部分操作，重试前请先确认。
-
-恢复历史时显示用户和助手的图片块，工具图片在展开详情后显示。缺失、超限或无法解码的图片保留占位提示；不自动下载远程 URL，不可信本地图片路径需确认，不渲染 SVG，不将图片二进制混入文本会话引用或摘要。旧版本已打开的聊天可从 Hub 重新恢复，以重新解析此前忽略的图片。
-
-### hub
-
-进入 hub、按 `g` 或开启 `l` 会在独立的 batch Emacs 子进程中读取历史，不再在界面线程扫描文件、数据库或等待历史列表 RPC。加载中保留旧列表；同一后端的重复请求共享读取进程，后台摘要也复用最近成功或正在进行的扫描。多个结果合并重绘。摘要准备和全文搜索的对话读取也在子进程中完成。读取进程不加载用户 init、不启用摘要模式；配置经私有 stdin 传入，不写临时配置文件。代价是扫描时有额外进程和内存占用；`agent-dash-history-timeout` 默认 120 秒，失败或超时保留旧数据，`!` 显示错误及读取耗时。live 筛选不是持续轮询；来源读取完成后自动更新。Hub buffer 存在时，聊天打开/关闭及进程存活状态变化会触发合并刷新，仅重读受影响的后端。停止 agent 时保留退出监听，直到确认进程已结束；若已有变更前启动的扫描，会在其结束后补取一次新快照。普通关闭聊天 buffer 仍只是 detach，后台 agent 继续运行时仍显示 live。
-
-历史扫描覆盖 Pi 根目录、项目目录和嵌套 JSONL；Codex 最新原生索引中的归档、子代理及仅剩元数据的线程；DSH 空会话；以及 Hermes 原生索引中的 CLI 历史。空会话、内部会话和归档会话先计入“已载入”，再由 Hub 过滤。Codex/Hermes 索引通过 `sqlite3 -readonly` 读取，需安装 `sqlite3`，不修改原生历史库内容。若 macOS 系统 CLI 无法打开 WAL 数据库，则使用已有 `python3` 标准库的 `mode=ro` 连接兼容读取；SQLite 可正常初始化缺失的 WAL/SHM 侧文件，主库数据不变，活动 WAL 的已提交内容也不会遗漏。仅该兼容路径需要 Python3，不使用 `immutable` 绕过活动 WAL。Codex 没有索引时回退到覆盖所有来源、归档状态并完整分页的 app-server 列表。`!` 可查看逐来源读取警告。
-
-`M-x agent-dash-hub` 在当前 frame 中创建或切换到名为 `agent-dash` 的专用 tab，复用已有 hub buffer 和窗口，不改变日常文件 tab 的窗口布局。新建、恢复、切换聊天，以及详情、搜索、队列和图片预览也在这个 tab 的同一个 frame 中打开：已显示时直接选中原窗口，否则分割现有窗口，不覆盖其他 Agent，也不创建新 frame。分屏空间不足时明确报错，请扩大 frame 或关闭不需要的窗口。聊天中用 `C-c C-q` 或 `/quit` 退出时同时关闭其分屏；取消退出则保留窗口。关闭最后一个聊天窗口时不删除 frame，优先显示已有 hub；hub 中按 `q` 返回最近使用的其他 tab，保留会话和专用 tab。Emacs 的 buffer 仍全局共享，不限制手动在其他 tab 打开。Hub 按项目分组列出所有会话。列：Agent、`●` 运行中、日期（`*` 表示来源时间，不是消息时间）、短 ID、项目、摘要（未生成时显示首句）、用户末句、摘要状态。
-
-专用 tab 在窗口增删（包括原生分屏、关闭窗口）或 frame 缩放后自动重排为均衡网格：常规横屏下，2 个窗口左右排列，3 个三等列，4 个十字排列；更多窗口或竖屏按可用尺寸选网格。重排保留 buffer、滚动位置和焦点；切换焦点或仅手动调整分屏尺寸不会触发重排，手动尺寸保留到下一次窗口增删或 frame 缩放。含专用、侧边或原子窗口的布局保持原样；空间不足以组成网格时也不强制压缩。
-
-| 键 | 作用 |
+| 变量 | 用途 |
 |---|---|
-| `RET` | 打开；已有聊天时直接切过去 |
-| `N` | 新建：按 `C`/`x`/`p`/`d`/`m` 选 Claude/Codex/pi/dsh/Hermes，再选目录 |
-| `i` | 详情：元数据与完整对话 |
-| `n` / `p`、`TAB` | 移动；折叠 / 展开当前分组 |
-| `Shift-TAB` | 全部折叠 / 展开当前视图的分组 |
-| `C-c C-n` / `C-c C-p` | 跳到下一个 / 上一个项目标题（仅项目分组视图，包含已折叠项目） |
-| `j` | 搜索并定位会话；结果显示项目路径 |
-| `f` | 视图菜单：项目、Agent、仅 live、显示隐藏、分组方式 |
-| `a` / `P` / `l` / `t` / `c` | Agent 筛选 / 项目筛选 / 仅 live / 时间倒序与分组切换 / 恢复默认 |
-| `s` | 语义搜索与问答（摘要或全文，经 gptel） |
-| `r` / `R` | 重新生成本条摘要 / 重试失败摘要 |
-| `d` / `u` / `x` | 标记 / 取消 / 执行删除（Claude、Pi） |
-| `D` | 项目目录搬家后重定向 |
-| `w` / `W` | 复制 ID / 项目路径 |
-| `!` / `?` / `q` | 诊断 / 命令菜单 / 返回之前的 tab |
+| `agent-dash-dsh-connection` | `auto`（默认）、`desktop` 或 `managed`；managed 模式启动 `dsh web` |
+| `agent-dash-dsh-permission` | 新会话默认 `"auto"`；可设为 `"read-only"`，或 nil 沿用 Host 默认值 |
+| `agent-dash-notify` | 开关后台任务结束提醒 |
 
-### 摘要与已有 ashub 数据
+Emacs 获得焦点时通过消息提醒后台任务结束，否则发送桌面通知。桌面通知优先使用已配置的 `notify-send` 封装，否则使用内置通知；失败后回退到 Emacs 消息。mode-line 标记可跳转到待回答请求和未读完成会话。DSH 断开后不会继续发送 Emacs 通知。
 
-加载 `agent-dash` 时默认启动摘要模式。gptel 是可选依赖，但生成摘要与语义搜索需要它配置好的默认后端/模型。要关闭自动启动，请在加载包**之前**设置（使用 `use-package` 时放在 `:init`）：
+暂不支持：TRAMP、Windows、分支/fork 界面、DSH 模型切换。
 
-```elisp
-(setq agent-dash-summary-enable nil)
-```
-
-要停止已经运行的调度器，执行 `(agent-dash-summary-mode -1)`；只修改启动选项不会停止现有调度器。
-
-启动时若已加载 `ashub-summary` 且存在 `*ashub*` buffer，会从其会话清单复制已有摘要，**不调用模型重算**。稍后也可运行 `M-x agent-dash-summary-import-ashub`。不会覆盖 agent-dash 已有摘要；ashub 中仍有效的条目在本地列出会话时采用当前时间戳，已过期的条目保留原摘要并等待更新。
-
-已关闭且内容稳定 300 秒的会话才进入摘要队列。新摘要任务通常至少间隔 60 秒，但长对话会分段请求并再次汇总，因此这**不是模型调用次数或费用上限**。发送内容为用户/助手对话（不含工具输出），其中仍可能含隐私；磁盘只保存摘要与调度元数据，不保存完整对话。若同时启用 ashub 与 agent-dash 的摘要模式，两套调度器可能重复调用模型、产生费用，请按需明确关闭其中一个。
-
-DSH 首句和末句读取本地 Host 投影缓存（`turnOutline` 版本 2），不是 `session/list` 的原生字段。缓存缺失或版本不支持时没有首末句；缓存文本可能滞后或已被 Host 截断。详情（`i`）采用助手左、用户右的气泡，支持逐条复制、折叠元数据（`m`）和复制原始对话（`C-c C-w`）；`g` 仅重新排版缓存对话，重新打开详情才会重新获取。`N`/`f`/`a`/`?` transient 菜单按 ashub 的交互方式组织。
-
-## 开发
-
-```sh
-make check    # 编译（警告视为错误）+ ERT 测试 + elisp-lint
-make indent   # 按 lint 的要求重新缩进
-```
-
-测试全部离线运行，使用 `test/bin/` 下的替身程序，不读取真实会话，也不调用模型。lint 依赖 `~/.emacs.d.default/elpa` 中已安装的包，可用 `ELPA=...` 指定其他目录。
+贡献者可用 `make check` 执行离线测试、严格编译和 lint，用 `make indent` 格式化 Elisp。架构说明见 [docs/DESIGN.md](docs/DESIGN.md)。
