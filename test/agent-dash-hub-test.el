@@ -11,6 +11,35 @@
 (require 'agent-dash)
 (require 'agent-dash-fake)
 
+(ert-deftest agent-dash-hub-test-text-columns-anchor-fallback-glyphs ()
+  "Fallback glyph widths must not accumulate into later column positions."
+  (let* ((layout '(:id 8 :project 20 :summary 40 :last 30 :status 0))
+         (prefix (agent-dash-hub--prefix layout " " "dsh" " " "2026-11-18 09:15"
+                                         "session1" "~/.emacs.d.default"))
+         (last-start (+ (string-width prefix) 40 3))
+         (status-start (+ last-start 30 3)))
+    (dolist (texts '(("normal summary" "normal prompt")
+                     ("已在 Emacs 配置中添加 ⌘ 数字切换 tab" "还有一个小 bug")
+                     ("normal summary" "使用 ⌘ 切换")))
+      (let* ((summary (propertize (car texts) 'help-echo "Full summary"))
+             (line (agent-dash-hub--text-columns
+                    layout prefix summary (cadr texts) "已生成"))
+             (gap (text-property-not-all 0 (length line) 'display nil line))
+             (next-gap (and gap (text-property-not-all
+                                (+ gap 3) (length line) 'display nil line))))
+        (should gap)
+        (should next-gap)
+        (should (equal (get-text-property gap 'display line)
+                       `(space :align-to ,last-start)))
+        (should (equal (get-text-property next-gap 'display line)
+                       `(space :align-to ,status-start)))
+        (should (equal (get-text-property (length prefix) 'help-echo line)
+                       "Full summary"))
+        (should (= (string-width (substring-no-properties line 0 (+ gap 3)))
+                   last-start))
+        (should (= (string-width (substring-no-properties line 0 (+ next-gap 3)))
+                   status-start))))))
+
 (ert-deftest agent-dash-hub-project-navigation ()
   "Project jumps skip session rows and include folded headers."
   (with-temp-buffer

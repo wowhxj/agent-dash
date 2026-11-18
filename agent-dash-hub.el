@@ -331,14 +331,27 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
           (when (> (plist-get layout :project) 0)
             (concat (agent-dash-hub--column project (plist-get layout :project)) " "))))
 
+(defun agent-dash-hub--text-columns (layout prefix summary last status)
+  "Format PREFIX, SUMMARY, LAST and STATUS using LAYOUT's display stops.
+Anchor the gaps rather than padding alone: fallback glyphs such as ⌘ can
+occupy more pixels than `string-width' predicts in graphical Emacs."
+  (let* ((last-start (+ (string-width prefix) (plist-get layout :summary) 3))
+         (status-start (+ last-start (plist-get layout :last) 3)))
+    (concat prefix
+            (agent-dash-hub--column summary (plist-get layout :summary))
+            (propertize "   " 'display `(space :align-to ,last-start))
+            (agent-dash-hub--column last (plist-get layout :last))
+            (propertize "   " 'display `(space :align-to ,status-start))
+            (agent-dash-hub--column status 8))))
+
 (defun agent-dash-hub--header (layout)
   "Return the column header line for LAYOUT."
   (propertize
-   (concat (propertize (agent-dash-hub--prefix layout " " "Agent" " " "日期*" "ID" "项目")
-                       'help-echo "日期 *：来源更新/创建时间，不是已验证的消息时间；D=待删除，●=后台实例或已打开")
-           (agent-dash-hub--column "摘要" (plist-get layout :summary)) "   "
-           (agent-dash-hub--column "用户末句" (plist-get layout :last)) "   "
-           (agent-dash-hub--column "摘要状态" 8)
+   (concat (agent-dash-hub--text-columns
+            layout
+            (propertize (agent-dash-hub--prefix layout " " "Agent" " " "日期*" "ID" "项目")
+                        'help-echo "日期 *：来源更新/创建时间，不是已验证的消息时间；D=待删除，●=后台实例或已打开")
+            "摘要" "用户末句" "摘要状态")
            (make-string (plist-get layout :status) ?\s) "\n")
    'face 'bold))
 
@@ -349,21 +362,21 @@ MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
          (status (agent-dash-summary-status row))
          (id (plist-get row :id)))
     (concat
-     (agent-dash-hub--prefix
-      layout (if (gethash (plist-get row :key) agent-dash-hub--marks) "D" " ")
-      (symbol-name (plist-get row :backend))
-      (if (agent-dash-hub-live-p row)
-          (propertize "●" 'face 'success 'help-echo "后台实例运行中或聊天已打开")
-        " ")
-      (agent-dash-hub-time row)
-      (propertize (gethash id (plist-get layout :short) id) 'help-echo id)
-      (agent-dash-hub--middle (abbreviate-file-name (or (plist-get row :root) ""))
-                              (max 1 (plist-get layout :project))))
-     (propertize (agent-dash-hub--column summary (plist-get layout :summary)) 'help-echo summary)
-     "   "
-     (propertize (agent-dash-hub--column last (plist-get layout :last)) 'help-echo last)
-     "   "
-     (agent-dash-hub--column status 8)
+     (agent-dash-hub--text-columns
+      layout
+      (agent-dash-hub--prefix
+       layout (if (gethash (plist-get row :key) agent-dash-hub--marks) "D" " ")
+       (symbol-name (plist-get row :backend))
+       (if (agent-dash-hub-live-p row)
+           (propertize "●" 'face 'success 'help-echo "后台实例运行中或聊天已打开")
+         " ")
+       (agent-dash-hub-time row)
+       (propertize (gethash id (plist-get layout :short) id) 'help-echo id)
+       (agent-dash-hub--middle (abbreviate-file-name (or (plist-get row :root) ""))
+                               (max 1 (plist-get layout :project))))
+      (propertize summary 'help-echo summary)
+      (propertize last 'help-echo last)
+      status)
      (agent-dash-hub--column (agent-dash-hub--row-status row) (plist-get layout :status)))))
 
 ;;;; Rendering
