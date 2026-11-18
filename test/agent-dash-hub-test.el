@@ -362,6 +362,43 @@
    (should (string-search (format "+ %s (1)" (abbreviate-file-name agent-dash-hub-test-beta))
                           (buffer-string)))))
 
+(ert-deftest agent-dash-hub-test-toggle-all-groups ()
+  (agent-dash-hub-test-with-hub
+   (should (eq (key-binding (kbd "<backtab>")) #'agent-dash-hub-toggle-all-groups))
+   (agent-dash-hub-toggle-group)
+   (should (equal (agent-dash-hub-test-ids) '("s1-aaaaaaaa")))
+   (agent-dash-hub--first-row)
+   (let ((group (agent-dash-hub--group-name (agent-dash-hub--row-at-point))))
+     (call-interactively (key-binding (kbd "<backtab>")))
+     (should-not (agent-dash-hub-test-ids))
+     (should (equal (get-text-property (point) 'agent-dash-group) group))
+     (call-interactively (key-binding (kbd "S-<tab>")))
+     (should (equal (agent-dash-hub-test-ids) '("s2-bbbbbbbb" "s1-aaaaaaaa")))
+     (should (equal (get-text-property (point) 'agent-dash-group) group)))
+   (agent-dash-hub-sort-by-time)
+   (should-error (agent-dash-hub-toggle-all-groups) :type 'user-error)))
+
+(ert-deftest agent-dash-hub-test-jump-shows-project-in-narrow-window ()
+  (agent-dash-hub-test-with-hub
+   (cl-letf (((symbol-function 'agent-dash-hub--window-width) (lambda () 80))
+             ((symbol-function 'completing-read)
+              (lambda (_prompt table &rest _)
+                (let* ((candidate (seq-find (lambda (item)
+                                             (string-search agent-dash-hub-test-beta item))
+                                           (all-completions "" table)))
+                       (line (get-text-property 0 'display candidate))
+                       (group (completion-metadata-get
+                               (completion-metadata "" table nil) 'group-function))
+                       (project-start (string-search "beta" line)))
+                  (should (string-match-p "项目" (funcall group candidate nil)))
+                  (should project-start)
+                  (should (equal (get-text-property project-start 'help-echo line)
+                                 agent-dash-hub-test-beta))
+                  candidate))))
+     (agent-dash-hub-search-all)
+     (should (equal (plist-get (agent-dash-hub--row-at-point) :root)
+                    agent-dash-hub-test-beta)))))
+
 (ert-deftest agent-dash-hub-test-live-toggle-refreshes-session-snapshot ()
   "Enabling live filtering discovers new instances and drops stopped ones."
   (agent-dash-hub-test-with-hub

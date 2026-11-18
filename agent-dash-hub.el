@@ -301,16 +301,19 @@ A shared buffer needs one column layout even when shown in several windows."
     (if windows (apply #'min (mapcar #'window-body-width windows))
       (window-body-width))))
 
-(defun agent-dash-hub--layout (rows)
-  "Compute column widths for ROWS in the visible hub windows."
+(defun agent-dash-hub--layout (rows &optional show-project)
+  "Compute column widths for ROWS in the visible hub windows.
+With SHOW-PROJECT, reserve a project column even in narrow windows."
   (let* ((width (agent-dash-hub--window-width))
          (short (agent-dash-hub--short-ids rows))
          (id (apply #'max 8 (mapcar #'string-width (hash-table-values short))))
-         (project (if (>= width 120)
-                      (min 20 (apply #'max 4 (mapcar (lambda (r) (string-width
-                                                                  (abbreviate-file-name
-                                                                   (or (plist-get r :root) ""))))
-                                                     rows)))
+         (project (if (or show-project (>= width 120))
+                      (min 20 (max 4 (- width id 64))
+                           (apply #'max 4
+                                  (mapcar (lambda (row)
+                                            (string-width (abbreviate-file-name
+                                                           (or (plist-get row :root) ""))))
+                                          rows)))
                     0))
          (message (max 28 (- width (+ 32 id (if (> project 0) (1+ project) 0)) 4)))
          (status (min (max 0 (- message 27))
@@ -360,7 +363,8 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
   (let* ((summary (agent-dash-hub--summary-text row))
          (last (agent-dash-hub--last-text row))
          (status (agent-dash-summary-status row))
-         (id (plist-get row :id)))
+         (id (plist-get row :id))
+         (root (plist-get row :root)))
     (concat
      (agent-dash-hub--text-columns
       layout
@@ -372,8 +376,9 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
          " ")
        (agent-dash-hub-time row)
        (propertize (gethash id (plist-get layout :short) id) 'help-echo id)
-       (agent-dash-hub--middle (abbreviate-file-name (or (plist-get row :root) ""))
-                               (max 1 (plist-get layout :project))))
+       (propertize (agent-dash-hub--middle (abbreviate-file-name (or root ""))
+                                           (max 1 (plist-get layout :project)))
+                   'help-echo root))
       (propertize summary 'help-echo summary)
       (propertize last 'help-echo last)
       status)
@@ -575,6 +580,23 @@ With a negative COUNT, move backward.  Stop at the list boundaries."
     (agent-dash-hub--render)
     (agent-dash-hub--goto (list 'group name))))
 
+(defun agent-dash-hub-toggle-all-groups ()
+  "Fold all groups in the current view, or unfold them if all are folded."
+  (interactive)
+  (unless agent-dash-hub--grouping (user-error "时间排序模式没有可折叠的分组"))
+  (when-let* ((rows (agent-dash-hub--visible)))
+    (let* ((names (delete-dups (mapcar #'agent-dash-hub--group-name rows)))
+           (fold (seq-some (lambda (name) (not (gethash name agent-dash-hub--collapsed)))
+                           names))
+           (row (get-text-property (point) 'agent-dash-row)))
+      (dolist (name names)
+        (if fold
+            (puthash name t agent-dash-hub--collapsed)
+          (remhash name agent-dash-hub--collapsed)))
+      (agent-dash-hub--render)
+      (when (and fold row)
+        (agent-dash-hub--goto (list 'group (agent-dash-hub--group-name row)))))))
+
 (defun agent-dash-hub-filter-agent-to (backend)
   "Show only BACKEND (nil for all) and jump to its newest session."
   (setq agent-dash-hub--agent backend)
@@ -645,7 +667,7 @@ Candidates keep the list order and show the table header as their group."
   (interactive)
   (let* ((visible (agent-dash-hub--visible))
          (groups (make-hash-table :test #'equal)) order
-         (layout (agent-dash-hub--layout visible))
+         (layout (agent-dash-hub--layout visible t))
          (header (string-trim-right (agent-dash-hub--header layout) "\n"))
          rows choices)
     (dolist (row visible)
@@ -1133,6 +1155,7 @@ whole original conversation."
     ("j" "定位会话" agent-dash-hub-search-all)
     ("s" "语义搜索 / 问答" agent-dash-search-menu)
     ("TAB" "折叠 / 展开" agent-dash-hub-toggle-group :transient t)
+    ("<backtab>" "全部折叠 / 展开" agent-dash-hub-toggle-all-groups :transient t)
     ("g" "刷新" agent-dash-hub-refresh)]
    ["视图"
     ("f" "会话视图" agent-dash-hub-filter-menu)
@@ -1165,7 +1188,10 @@ whole original conversation."
                      ("n" . agent-dash-hub-next-entry) ("p" . agent-dash-hub-previous-entry)
                      ("C-c C-n" . agent-dash-hub-next-project)
                      ("C-c C-p" . agent-dash-hub-previous-project)
-                     ("TAB" . agent-dash-hub-toggle-group) ("g" . agent-dash-hub-refresh)
+                     ("TAB" . agent-dash-hub-toggle-group)
+                     ("<backtab>" . agent-dash-hub-toggle-all-groups)
+                     ("S-<tab>" . agent-dash-hub-toggle-all-groups)
+                     ("g" . agent-dash-hub-refresh)
                      ("i" . agent-dash-hub-details)
                      ("d" . agent-dash-hub-mark-delete) ("u" . agent-dash-hub-unmark-delete)
                      ("x" . agent-dash-hub-execute-deletions)
@@ -1183,7 +1209,8 @@ whole original conversation."
 
 N 新建（C/x/p/d/m 选择 Agent，再选目录）；RET 打开/恢复；n/p 移动；j 定位会话。
 f 会话视图菜单；a Agent 筛选；P 项目筛选；l 仅存活；f h 显示不摘要会话；
-t 时间倒序/项目分组；f g 按 Agent 分组；c 恢复默认；TAB 折叠/展开；g 刷新。
+t 时间倒序/项目分组；f g 按 Agent 分组；c 恢复默认；g 刷新。
+TAB 折叠/展开当前分组；Shift-TAB 全部折叠/展开。
 i 详情/对话；s 语义搜索/问答；r 生成摘要；R 重试失败摘要（需 `agent-dash-summary-mode'）。
 d 标记删除；u 取消；x 执行删除（Claude/Pi）；D 项目目录重定向；! 诊断。
 w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
