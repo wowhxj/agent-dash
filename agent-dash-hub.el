@@ -439,6 +439,9 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
                                               "  [目录缺失：D 重定向]" ""))
                                   'face 'bold))
               (add-text-properties start (point) (list 'agent-dash-group name
+                                                       'agent-dash-project-root
+                                                       (and (eq agent-dash-hub--grouping 'project)
+                                                            (plist-get (car group) :root))
                                                        'agent-dash-key (list 'group name)))))
           (unless folded
             (dolist (row group)
@@ -700,9 +703,11 @@ Candidates keep the list order and show the table header as their group."
 (defun agent-dash-hub--new (backend)
   "Choose a project directory and start a BACKEND session there."
   (let* ((row (get-text-property (point) 'agent-dash-row))
+         (group-root (get-text-property (point) 'agent-dash-project-root))
          (initial (file-name-as-directory
                    (or (and row (plist-get row :root) (not (plist-get row :missing))
                             (plist-get row :root))
+                       (and group-root (file-directory-p group-root) group-root)
                        default-directory)))
          (directory (read-directory-name
                      (format "%s 项目目录：" (cadr (assq backend agent-dash-hub--agents)))

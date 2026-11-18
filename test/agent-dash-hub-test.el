@@ -458,6 +458,43 @@
     (should (equal (agent-dash-hub--relocate "/old/project") "/old/project"))
     (should (plist-get (agent-dash-hub--row 'fake '(:id "x" :root "/old/proj")) :missing))))
 
+(ert-deftest agent-dash-hub-test-new-session-defaults-to-project-heading ()
+  "Project headings supply the same default directory as their sessions."
+  (agent-dash-hub-test-with-hub
+   (let ((default-directory temporary-file-directory)
+         initial opened)
+     (cl-letf (((symbol-function 'read-directory-name)
+                (lambda (_prompt directory &rest _)
+                  (setq initial directory)
+                  directory))
+               ((symbol-function 'agent-dash-open)
+                (lambda (backend directory &rest _)
+                  (setq opened (list backend directory)))))
+       (setq agent-dash-hub--grouping 'project)
+       (dolist (root (list agent-dash-hub-test-alpha agent-dash-hub-test-beta))
+         (let ((name (abbreviate-file-name root)))
+           (dolist (folded '(nil t))
+             (puthash name folded agent-dash-hub--collapsed)
+             (agent-dash-hub--render)
+             (agent-dash-hub--goto (list 'group name))
+             (should (equal (get-text-property (point) 'agent-dash-group) name))
+             (should-not (get-text-property (point) 'agent-dash-row))
+             (agent-dash-hub--new 'fake)
+             (should (equal initial (file-name-as-directory root)))
+             (should (equal opened (list 'fake (file-name-as-directory root)))))))
+       ;; Session rows keep their existing project default.
+       (clrhash agent-dash-hub--collapsed)
+       (agent-dash-hub--render)
+       (agent-dash-hub--goto "fake:s1-aaaaaaaa")
+       (agent-dash-hub--new 'fake)
+       (should (equal initial (file-name-as-directory agent-dash-hub-test-alpha)))
+       ;; Agent headings are not project directories.
+       (setq agent-dash-hub--grouping 'agent)
+       (agent-dash-hub--render)
+       (agent-dash-hub--goto '(group "fake"))
+       (agent-dash-hub--new 'fake)
+       (should (equal initial (file-name-as-directory default-directory)))))))
+
 (ert-deftest agent-dash-hub-test-new-session-and-details ()
   (agent-dash-hub-test-with-hub
    (agent-dash-hub--goto "fake:s1-aaaaaaaa")
