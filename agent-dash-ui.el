@@ -23,7 +23,7 @@
   :type 'integer)
 
 (defcustom agent-dash-show-pinned-prompt t
-  "Whether to show the latest user prompt above the conversation.
+  "Whether to show the latest user prompt above the composer.
 To apply a change to an open chat, run `agent-dash-refresh-chat'."
   :type 'boolean)
 
@@ -64,7 +64,7 @@ Other chats keep their requests visible until selected or answered with
 (defvar-local agent-dash--input-overlay nil "Overlay decorating the composer.")
 (defvar-local agent-dash--input-heading-overlay nil
   "Overlay adding shortcut hints to the protected composer heading.")
-(defconst agent-dash--composer-separator "\n 输入消息 \n"
+(defconst agent-dash--composer-separator "\n 输入消息 \n\n"
   "Read-only heading on a separate physical line above the editable draft.")
 (defvar-local agent-dash--attachment-overlay nil
   "Overlay showing staged images on the separator before the composer.")
@@ -287,6 +287,8 @@ visibility choices survive intermediate updates, but not the finish transition."
             (plist-put item :process-active nil)
             (agent-dash--render session item)))
         (agent-dash--render-process session item)
+        (when (eq (plist-get item :type) 'user)
+          (agent-dash--resize-input-hints nil))
         (agent-dash--sync-spinner)
         (agent-dash--schedule-answer)
         (force-mode-line-update)))))
@@ -484,8 +486,8 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                            (string-replace "%" "%%" right))))
         (propertize line 'help-echo help)))))
 
-(defun agent-dash--pinned-prompt ()
-  "Return the latest user prompt, pinned above the conversation."
+(defun agent-dash--pinned-prompt (width)
+  "Return the latest user prompt preview fitted to WIDTH columns."
   (when-let* ((s agent-dash--session)
               (item (seq-find (lambda (i) (eq (plist-get i :type) 'user))
                               (reverse (agent-dash-session-items s)))))
@@ -497,9 +499,10 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                      (if (and (string-blank-p prompt) (plist-get item :images))
                          (format "[%d 张图片]" (length (plist-get item :images)))
                        prompt)
-                     (max 1 (- (window-body-width) (string-width label))))))
-      (concat (propertize label 'face 'bold)
-              (propertize (string-replace "%" "%%" preview) 'help-echo prompt)))))
+                     (max 1 (- width (string-width label))))))
+      (propertize (truncate-string-to-width
+                   (concat (propertize label 'face 'bold) preview) width)
+                  'help-echo prompt))))
 
 ;;;; Buffer
 
@@ -539,8 +542,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
 \\{agent-dash-mode-map}"
   (agent-dash--install-status-line)
   (setq-local tab-line-format '(:eval (agent-dash--header)))
-  (setq-local header-line-format
-              (and agent-dash-show-pinned-prompt '(:eval (agent-dash--pinned-prompt))))
+  (setq-local header-line-format nil)
   (add-to-invisibility-spec 'agent-dash-process)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
@@ -579,7 +581,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     buffer))
 
 (defun agent-dash--resize-input-hints (_window)
-  "Fit composer shortcut hints to the narrowest window showing this chat."
+  "Fit the prompt preview and shortcuts to the narrowest chat window."
   (when (and (overlayp agent-dash--input-heading-overlay)
              (overlay-buffer agent-dash--input-heading-overlay))
     (let* ((windows (get-buffer-window-list (current-buffer) nil t))
@@ -593,7 +595,11 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                   '("  ────  RET 发送 · Shift-RET 换行 · TAB 补全 / 和 @"
                     "  ────  RET 发送 · TAB 补全" "  ────" ""))))
       (overlay-put agent-dash--input-heading-overlay 'after-string
-                   (and hint (propertize hint 'face 'shadow))))))
+                   (and hint (propertize hint 'face 'shadow)))
+      (overlay-put agent-dash--input-heading-overlay 'before-string
+                   (when-let* ((agent-dash-show-pinned-prompt)
+                               (preview (agent-dash--pinned-prompt width)))
+                     (concat preview "\n"))))))
 
 (defun agent-dash--decorate-input ()
   "Decorate the composer without changing its text or prompt history."
@@ -612,14 +618,17 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (setq agent-dash--attachment-overlay
           (make-overlay (1- agent-dash--input-start) agent-dash--input-start
                         nil t nil))
-    (overlay-put agent-dash--attachment-overlay 'before-string (concat "\n" previews)))
+    (overlay-put agent-dash--attachment-overlay 'before-string
+                 (if (> (- agent-dash--input-start agent-dash--transcript-end) 2)
+                     (substring previews 0 -1)
+                   (concat "\n" previews))))
   (when (overlayp agent-dash--input-heading-overlay)
     (delete-overlay agent-dash--input-heading-overlay))
   (setq agent-dash--input-heading-overlay nil)
   ;; Queue editors already have their own header and no separator text.
   (when (> (- agent-dash--input-start agent-dash--transcript-end) 2)
     (setq agent-dash--input-heading-overlay
-          (make-overlay (1+ agent-dash--transcript-end) (1- agent-dash--input-start)))
+          (make-overlay (1+ agent-dash--transcript-end) (- agent-dash--input-start 2)))
     (overlay-put agent-dash--input-heading-overlay 'face 'agent-dash-separator-face)
     (agent-dash--resize-input-hints nil)
     (add-hook 'window-size-change-functions #'agent-dash--resize-input-hints nil t)))
@@ -647,8 +656,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     (setq agent-dash--transcript-end (copy-marker (point-min) t)
           agent-dash--input-start (copy-marker (point-max)))
     (setq-local tab-line-format '(:eval (agent-dash--header)))
-    (setq-local header-line-format
-                (and agent-dash-show-pinned-prompt '(:eval (agent-dash--pinned-prompt))))
+    (setq-local header-line-format nil)
     (agent-dash--install-status-line)
     (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t)
     (add-to-invisibility-spec 'agent-dash-process)
