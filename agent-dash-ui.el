@@ -249,7 +249,9 @@ visibility choices survive intermediate updates, but not the finish transition."
 
 (defun agent-dash--render (session item)
   "Insert or redraw timeline ITEM of SESSION in the current buffer."
+  ;; Transcript edits must not deactivate a selection in the draft.
   (let ((inhibit-read-only t)
+        (deactivate-mark nil)
         (buffer-undo-list t)
         (start (plist-get item :start)))
     (save-excursion
@@ -537,6 +539,18 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
     map)
   "Keymap for `agent-dash-mode'.")
 
+(defun agent-dash--discard-stale-region-overlay (window)
+  "Let Emacs rebuild the region highlight if it belongs to another WINDOW."
+  ;; Emacs 32 can reuse a cached region overlay after a layout restore,
+  ;; but its `window' property still restricts it to the original window.
+  (when-let* ((overlay (window-parameter window 'internal-region-overlay))
+              ((overlayp overlay))
+              (owner (overlay-get overlay 'window))
+              ((not (eq owner window))))
+    (unless (window-live-p owner)
+      (delete-overlay overlay))
+    (set-window-parameter window 'internal-region-overlay nil)))
+
 (define-derived-mode agent-dash-mode fundamental-mode "Agent"
   "Chat with an agent.  The composer is below the line.
 \\{agent-dash-mode-map}"
@@ -550,6 +564,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (add-hook 'kill-buffer-hook #'agent-dash--on-kill nil t)
   (add-hook 'post-command-hook #'agent-dash--schedule-answer nil t)
   (add-hook 'post-command-hook #'agent-dash-notify--seen nil t)
+  (add-hook 'pre-redisplay-functions #'agent-dash--discard-stale-region-overlay -90 t)
   (add-hook 'change-major-mode-hook #'agent-dash--stop-answer-timer nil t)
   (add-hook 'change-major-mode-hook #'agent-dash--stop-spinner nil t))
 

@@ -137,6 +137,47 @@ second line"))))
    (should (equal agent-dash--history '("send exactly this")))
    (should (equal (agent-dash--input) ""))))
 
+(ert-deftest agent-dash-ui-test-transcript-update-preserves-draft-selection ()
+  (agent-dash-ui-test-with-chat
+   (agent-dash--set-input "first line\nsecond line")
+   (let ((transient-mark-mode t)
+         (deactivate-mark nil))
+     (goto-char agent-dash--input-start)
+     (push-mark (point) t t)
+     (forward-char 5)
+     (agent-dash-emit session '(:type notice :id "notice" :text "background output"))
+     (should-not deactivate-mark)
+     (should (use-region-p))
+     (should (equal (buffer-substring-no-properties (region-beginning) (region-end))
+                    "first")))))
+
+(ert-deftest agent-dash-ui-test-region-highlight-in-restored-window ()
+  (skip-unless (fboundp 'redisplay--update-region-highlight))
+  (save-window-excursion
+    (agent-dash-ui-test-with-chat
+     (switch-to-buffer (current-buffer))
+     (agent-dash--set-input "draft")
+     (let* ((window (selected-window))
+            (old-window (split-window-below))
+            (transient-mark-mode t)
+            (stale (make-overlay agent-dash--input-start (point-max))))
+       (overlay-put stale 'window old-window)
+       (overlay-put stale 'face 'region)
+       (delete-window old-window)
+       (set-window-parameter window 'internal-region-overlay stale)
+       (unwind-protect
+           (progn
+             (push-mark agent-dash--input-start t t)
+             (goto-char (point-max))
+             (should (use-region-p))
+             (run-hook-with-args 'pre-redisplay-functions window)
+             (let ((region (window-parameter window 'internal-region-overlay)))
+               (should (eq (overlay-get region 'window) window))
+               (should (eq (get-char-property agent-dash--input-start 'face window)
+                           'region))))
+         (delete-overlay (window-parameter window 'internal-region-overlay))
+         (set-window-parameter window 'internal-region-overlay nil))))))
+
 (ert-deftest agent-dash-ui-test-i-focuses-composer-across-backends ()
   "Transcript i focuses the draft without inserting text or calling a backend."
   (let ((agent-dash--sessions nil)
