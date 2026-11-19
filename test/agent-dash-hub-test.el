@@ -132,6 +132,35 @@
          (delete-directory agent-dash-hub-test-beta)
          (delete-file agent-dash-summary-cache-file)))))
 
+(ert-deftest agent-dash-hub-test-jump-project-picker ()
+  "Project completion includes folds and switches grouping without losing filters."
+  (agent-dash-hub-test-with-hub
+   (should (eq (lookup-key agent-dash-hub-mode-map (kbd "C-c C-j"))
+               #'agent-dash-hub-jump-project))
+   (let ((project (abbreviate-file-name agent-dash-hub-test-beta)))
+     (puthash project t agent-dash-hub--collapsed)
+     (dolist (grouping '(project agent nil))
+       (setq agent-dash-hub--grouping grouping)
+       (agent-dash-hub--render)
+       (cl-letf (((symbol-function 'completing-read)
+                  (lambda (_prompt choices &rest _)
+                    (should (member project choices))
+                    (should (= (length choices) 2))
+                    project)))
+         (agent-dash-hub-jump-project))
+       (should (eq agent-dash-hub--grouping 'project))
+       (should (equal (get-text-property (point) 'agent-dash-group) project))
+       (should (gethash project agent-dash-hub--collapsed)))
+     (setq agent-dash-hub--project "ad-beta")
+     (agent-dash-hub--render)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt choices &rest _)
+                  (should (equal choices (list project))) project)))
+       (agent-dash-hub-jump-project))
+     (should (equal agent-dash-hub--project "ad-beta"))
+     (setq agent-dash-hub--project "no-such-project")
+     (should-error (agent-dash-hub-jump-project) :type 'user-error))))
+
 (defun agent-dash-hub-test-lines ()
   "Return the hub lines after the column header, trimmed."
   (save-excursion

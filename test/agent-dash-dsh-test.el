@@ -14,6 +14,73 @@
   "Feed follow-stream frame JSON (a string) to SESSION."
   (agent-dash-dsh--item session (agent-dash-json-read json)))
 
+(ert-deftest agent-dash-dsh-test-model-picker ()
+  "Client /model uses the catalog and selectModel APIs, never commands/execute."
+  (let ((s (agent-dash-session-create 'dsh "/tmp")) calls)
+    (agent-dash-set-data s :sid "session-1")
+    (cl-letf (((symbol-function 'agent-dash-dsh--call)
+               (lambda (method &optional args _retry)
+                 (push (cons method args) calls)
+                 (pcase method
+                   ("session/modelCatalog"
+                    (agent-dash-json-read
+                     "{\"groups\":[{\"id\":\"proxy\",\"models\":[{\"id\":\"org/model\"}]},{\"id\":\"other\",\"models\":[{\"id\":\"org/model\"}]}]}"))
+                   ("session/selectModel"
+                    (agent-dash-json-read
+                     "{\"selected\":{\"provider\":\"proxy\",\"model\":\"org/model\",\"reasoningEffort\":\"high\"}}"))
+                   (_ (ert-fail (format "Unexpected RPC: %s" method)))))))
+      (should (plist-get (agent-dash-backend-capabilities 'dsh) :models))
+      (should (equal (agent-dash-backend-models 'dsh s)
+                     '("proxy/org/model" "other/org/model")))
+      (agent-dash-backend-set-model 'dsh s "proxy/org/model")
+      (should (equal (car calls)
+                     '("session/selectModel" :request
+                       (:sessionId "session-1" :provider "proxy" :model "org/model"))))
+      (should (equal (plist-get (agent-dash-session-meta s) :model) "org/model"))
+      (should (equal (plist-get (agent-dash-session-meta s) :provider) "proxy"))
+      (should-error (agent-dash-backend-set-model 'dsh s "missing") :type 'user-error)
+      (with-temp-buffer
+        (setq-local agent-dash--session s)
+        (cl-letf (((symbol-function 'agent-dash--input) (lambda () "/model"))
+                  ((symbol-function 'agent-dash--set-input) #'ignore)
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "other/org/model")))
+          (should (agent-dash-input-dispatch "/model"))
+          (should (equal (plist-get (plist-get (cdr (car calls)) :request) :provider) "other")))))))
+
+(ert-deftest agent-dash-dsh-test-select-model-wire-request ()
+  "The gateway descriptor names the selectModel JSON parameter request."
+  (let ((s (agent-dash-session-create 'dsh "/tmp"))
+        (agent-dash-dsh--host '(:base "http://localhost/" :cookie "test")))
+    (agent-dash-set-data s :sid "session-1")
+    (agent-dash-set-data s :model-choices
+                         '(("proxy/model" :provider "proxy" :model "model")))
+    (cl-letf (((symbol-function 'agent-dash-dsh--retrieve)
+               (lambda (_url _method body _cookie)
+                 (let* ((message (agent-dash-json-read body))
+                        (args (agent-dash-jget (agent-dash-jget message "payload") "args"))
+                        (request (agent-dash-jget args "request")))
+                   (should (hash-table-p request))
+                   (should (= (hash-table-count args) 1))
+                   (should (equal (agent-dash-jget request "sessionId") "session-1"))
+                   (should (equal (agent-dash-jget request "provider") "proxy"))
+                   (should (equal (agent-dash-jget request "model") "model"))
+                   (list 200 nil
+                         (json-serialize
+                          (list :rpcId (agent-dash-jget message "rpcId")
+                                :result (list :ok t
+                                              :value (list :selected
+                                                           (list :provider "proxy"
+                                                                 :model "model"))))))))))
+      (agent-dash-backend-set-model 'dsh s "proxy/model")
+      (should (equal (plist-get (agent-dash-session-meta s) :model) "model")))))
+
+(ert-deftest agent-dash-dsh-test-empty-model-catalog ()
+  (cl-letf (((symbol-function 'agent-dash-dsh--call)
+             (lambda (&rest _) (agent-dash-json-read "{\"groups\":[]}"))))
+    (should-error (agent-dash-backend-models 'dsh (agent-dash-session-create 'dsh "/tmp"))
+                  :type 'user-error)))
+
 (ert-deftest agent-dash-dsh-test-turn ()
   (let ((s (agent-dash-session-create 'dsh "/tmp")))
     (dolist (f '("{\"type\":\"item\",\"value\":{\"type\":\"event\",\"event\":{\"seq\":1,\"type\":\"turn/start\",\"data\":{}}}}"

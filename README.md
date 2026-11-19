@@ -63,6 +63,7 @@ The summary column shows an AI summary when available, otherwise the first user 
 | `j` | Search all loaded sessions, including hidden groups |
 | `n` / `p` | Next / previous visible session |
 | `C-c C-n` / `C-c C-p` | Next / previous project |
+| `C-c C-j` | Choose a project and jump to its header |
 | `TAB` / `Shift-TAB` | Fold current / all groups |
 | `f` / `a` / `P` | View filters / agent filter / project filter |
 | `l` / `c` | Toggle live-only view / reset filters |
@@ -94,6 +95,6 @@ Use `M-x customize-group RET agent-dash` for all options.
 
 Completion reminders use Emacs messages while Emacs is focused, and desktop notifications otherwise. Desktop delivery uses your `notify-send` wrapper if configured, or built-in notifications; failures fall back to Emacs messages. Mode-line badges link to pending requests and unread completions. Detached DSH sessions do not send Emacs notifications.
 
-Not supported: TRAMP, Windows, branch/fork UI and DSH model switching.
+Not supported: TRAMP, Windows and branch/fork UI.
 
 For contributors: `make check` runs offline tests, strict byte compilation and lint; `make indent` formats Elisp. Architecture notes are in [docs/DESIGN.md](docs/DESIGN.md).

@@ -63,6 +63,7 @@
 | `j` | 搜索所有已载入会话，包括隐藏分组 |
 | `n` / `p` | 下一个 / 上一个可见会话 |
 | `C-c C-n` / `C-c C-p` | 下一个 / 上一个项目 |
+| `C-c C-j` | 选择项目并跳到项目标题行 |
 | `TAB` / `Shift-TAB` | 折叠当前 / 全部分组 |
 | `f` / `a` / `P` | 视图筛选 / Agent 筛选 / 项目筛选 |
 | `l` / `c` | 切换仅存活视图 / 重置筛选 |
@@ -94,6 +95,6 @@
 
 Emacs 获得焦点时通过消息提醒后台任务结束，否则发送桌面通知。桌面通知优先使用已配置的 `notify-send` 封装，否则使用内置通知；失败后回退到 Emacs 消息。mode-line 标记可跳转到待回答请求和未读完成会话。DSH 断开后不会继续发送 Emacs 通知。
 
-暂不支持：TRAMP、Windows、分支/fork 界面、DSH 模型切换。
+暂不支持：TRAMP、Windows、分支/fork 界面。
 
 贡献者可用 `make check` 执行离线测试、严格编译和 lint，用 `make indent` 格式化 Elisp。架构说明见 [docs/DESIGN.md](docs/DESIGN.md)。

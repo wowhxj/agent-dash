@@ -570,6 +570,21 @@ With a negative COUNT, move backward.  Stop at the list boundaries."
   (interactive "p")
   (agent-dash-hub-next-project (- (or count 1))))
 
+(defun agent-dash-hub-jump-project ()
+  "Choose a filtered project and jump to its header, even when folded.
+Switch to project grouping if necessary, without changing filters or folds."
+  (interactive)
+  (let* ((projects (let ((agent-dash-hub--grouping 'project))
+                     (delete-dups (mapcar #'agent-dash-hub--group-name
+                                          (agent-dash-hub--visible)))))
+         (project (progn
+                    (unless projects (user-error "当前视图没有项目"))
+                    (completing-read "跳转到项目: " projects nil t))))
+    (unless (eq agent-dash-hub--grouping 'project)
+      (setq agent-dash-hub--grouping 'project)
+      (agent-dash-hub--render))
+    (agent-dash-hub--goto (list 'group project))))
+
 (defun agent-dash-hub-toggle-group ()
   "Fold or unfold the group at point."
   (interactive)
@@ -1151,6 +1166,7 @@ whole original conversation."
     ("p" "上一条" agent-dash-hub-previous-entry :transient t)
     ("C-c C-n" "下一项目" agent-dash-hub-next-project :transient t)
     ("C-c C-p" "上一项目" agent-dash-hub-previous-project :transient t)
+    ("C-c C-j" "跳转项目" agent-dash-hub-jump-project :transient t)
     ("j" "定位会话" agent-dash-hub-search-all)
     ("s" "语义搜索 / 问答" agent-dash-search-menu)
     ("TAB" "折叠 / 展开" agent-dash-hub-toggle-group :transient t)
@@ -1187,6 +1203,7 @@ whole original conversation."
                      ("n" . agent-dash-hub-next-entry) ("p" . agent-dash-hub-previous-entry)
                      ("C-c C-n" . agent-dash-hub-next-project)
                      ("C-c C-p" . agent-dash-hub-previous-project)
+                     ("C-c C-j" . agent-dash-hub-jump-project)
                      ("TAB" . agent-dash-hub-toggle-group)
                      ("<backtab>" . agent-dash-hub-toggle-all-groups)
                      ("S-<tab>" . agent-dash-hub-toggle-all-groups)

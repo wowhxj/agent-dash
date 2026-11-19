@@ -58,7 +58,7 @@ The cookie lives only in memory.")
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql dsh)))
   "DSH implementation of `agent-dash-backend-capabilities'."
-  (list :quit 'detach :steer t :images t :models nil))
+  (list :quit 'detach :steer t :images t :models t))
 
 ;;;; Host discovery and authentication
 
@@ -660,6 +660,38 @@ This runs on protocol input, never during display-only redraw."
     (push session agent-dash-dsh--session-list)
     (agent-dash-dsh--ensure-events)
     (agent-dash-dsh--follow session)))
+
+(cl-defmethod agent-dash-backend-models ((_ (eql dsh)) session)
+  "Return provider-qualified model choices for SESSION from the DSH catalog."
+  (let ((catalog (agent-dash-dsh--call "session/modelCatalog" nil)) choices)
+    (dolist (group (agent-dash-jget catalog "groups"))
+      (dolist (model (agent-dash-jget group "models"))
+        (let ((provider (agent-dash-jget group "id"))
+              (id (agent-dash-jget model "id")))
+          (push (cons (concat provider "/" id)
+                      (list :provider provider :model id)) choices))))
+    (unless choices
+      (user-error "DSH model catalog is empty: %s"
+                  (mapconcat (lambda (failure) (or (agent-dash-jget failure "message") ""))
+                             (agent-dash-jget catalog "failures") "; ")))
+    (agent-dash-set-data session :model-choices (nreverse choices))
+    (mapcar #'car (agent-dash-data session :model-choices))))
+
+(cl-defmethod agent-dash-backend-set-model ((_ (eql dsh)) session model)
+  "Select MODEL for SESSION via the DSH API, not the slash command registry."
+  (unless (agent-dash-data session :model-choices)
+    (agent-dash-backend-models 'dsh session))
+  (let ((selection (cdr (assoc model (agent-dash-data session :model-choices)))))
+    (unless selection (user-error "Unknown DSH model: %s" model))
+    (let* ((result (agent-dash-dsh--call
+                    "session/selectModel"
+                    (list :request
+                          (append (list :sessionId (agent-dash-data session :sid)) selection))))
+           (selected (agent-dash-jget result "selected")))
+      (agent-dash-emit session (list :type 'meta
+                                     :model (agent-dash-jget selected "model")
+                                     :provider (agent-dash-jget selected "provider")
+                                     :thinking (agent-dash-jget selected "reasoningEffort"))))))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql dsh)) session text images mode)
   "DSH `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."
