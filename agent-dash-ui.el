@@ -66,8 +66,8 @@ Other chats keep their requests visible until selected or answered with
   "Overlay adding shortcut hints to the protected composer heading.")
 (defconst agent-dash--composer-separator "\n 输入消息 \n\n"
   "Read-only heading on a separate physical line above the editable draft.")
-(defvar-local agent-dash--attachment-overlay nil
-  "Overlay showing staged images on the separator before the composer.")
+(defvar-local agent-dash--attachments-start nil
+  "Marker at the first attachment control.")
 (defvar-local agent-dash--spinner-index 0 "Current activity animation frame.")
 (defvar-local agent-dash--spinner-timer nil "Timer while this chat is running.")
 (defvar-local agent-dash--history nil "Sent prompts, newest first.")
@@ -585,9 +585,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
       (agent-dash-mode)
       (setq agent-dash--session session
             default-directory (agent-dash-session-root session))
-      (let ((inhibit-read-only t))
-        (insert (propertize agent-dash--composer-separator
-                            'read-only t 'front-sticky '(read-only) 'rear-nonsticky t)))
+      (agent-dash--insert-composer-separator agent-dash--composer-separator)
       (setq agent-dash--transcript-end (copy-marker (point-min) t)
             agent-dash--input-start (copy-marker (point-max)))
       (agent-dash--decorate-input))
@@ -616,6 +614,16 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
                                (preview (agent-dash--pinned-prompt width)))
                      (concat preview "\n"))))))
 
+(defun agent-dash--insert-composer-separator (separator)
+  "Insert SEPARATOR and reserve positions for keyboard attachment controls."
+  (let ((inhibit-read-only t)
+        (start (point))
+        (heading (substring separator 0 -1)))
+    (insert heading (agent-dash-image--attachment-slots) "\n")
+    (add-text-properties start (point)
+                         '(read-only t front-sticky (read-only) rear-nonsticky t))
+    (setq agent-dash--attachments-start (copy-marker (+ start (length heading)) t))))
+
 (defun agent-dash--decorate-input ()
   "Decorate the composer without changing its text or prompt history."
   (when (overlayp agent-dash--input-overlay)
@@ -623,27 +631,17 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
   (setq agent-dash--input-overlay
         (make-overlay agent-dash--input-start (point-max) nil nil t))
   (overlay-put agent-dash--input-overlay 'face 'agent-dash-input-face)
-  ;; A multiline before-string at the input position confuses redisplay's
-  ;; cursor placement (and IME preedit), especially for an empty draft.
-  ;; Anchor previews to the real separator newline instead.  Advance its
-  ;; front on transcript insertion, but never its rear on draft insertion.
-  (when (overlayp agent-dash--attachment-overlay)
-    (delete-overlay agent-dash--attachment-overlay))
-  (when-let* ((previews (agent-dash-image-attachments-string)))
-    (setq agent-dash--attachment-overlay
-          (make-overlay (1- agent-dash--input-start) agent-dash--input-start
-                        nil t nil))
-    (overlay-put agent-dash--attachment-overlay 'before-string
-                 (if (> (- agent-dash--input-start agent-dash--transcript-end) 2)
-                     (substring previews 0 -1)
-                   (concat "\n" previews))))
+  ;; Updating the slots changes only display properties, keeping draft
+  ;; positions and undo entries stable as attachments come and go.
+  (agent-dash-image--decorate-attachments agent-dash--attachments-start)
   (when (overlayp agent-dash--input-heading-overlay)
     (delete-overlay agent-dash--input-heading-overlay))
   (setq agent-dash--input-heading-overlay nil)
   ;; Queue editors already have their own header and no separator text.
-  (when (> (- agent-dash--input-start agent-dash--transcript-end) 2)
+  (when (> (- agent-dash--attachments-start agent-dash--transcript-end) 1)
     (setq agent-dash--input-heading-overlay
-          (make-overlay (1+ agent-dash--transcript-end) (- agent-dash--input-start 2)))
+          (make-overlay (1+ agent-dash--transcript-end)
+                        (1- agent-dash--attachments-start)))
     (overlay-put agent-dash--input-heading-overlay 'face 'agent-dash-separator-face)
     (agent-dash--resize-input-hints nil)
     (add-hook 'window-size-change-functions #'agent-dash--resize-input-hints nil t)))
@@ -666,8 +664,7 @@ Redisplay never issues requests.  Run state belongs only in the mode line."
         (plist-put item key nil))
       (plist-put item :process-group nil))
     (erase-buffer)
-    (insert (propertize agent-dash--composer-separator
-                        'read-only t 'front-sticky '(read-only) 'rear-nonsticky t))
+    (agent-dash--insert-composer-separator agent-dash--composer-separator)
     (setq agent-dash--transcript-end (copy-marker (point-min) t)
           agent-dash--input-start (copy-marker (point-max)))
     (setq-local tab-line-format '(:eval (agent-dash--header)))

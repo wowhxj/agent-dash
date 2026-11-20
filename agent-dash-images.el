@@ -28,6 +28,8 @@ Providers may impose smaller limits."
 
 (defvar agent-dash--session)
 (defvar agent-dash--input-start)
+(defconst agent-dash-image--max-attachments 10
+  "Maximum number of images staged in a composer.")
 (defvar-local agent-dash--attachments nil "Images staged for the next submission.")
 (defvar-local agent-dash--last-image-draft nil "Last image submission, for explicit recovery.")
 (defvar-local agent-dash--image-cache nil "Decoded thumbnail cache for this chat.")
@@ -119,11 +121,14 @@ Remote URLs remain placeholders.  No network requests are made here."
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] #'agent-dash-open-image)
     (define-key map (kbd "RET") #'agent-dash-open-image)
+    (define-key map (kbd "<return>") #'agent-dash-open-image)
     map)
   "Keymap for inline images.")
 
 (defvar agent-dash-image-remove-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'agent-dash-remove-image)
+    (define-key map (kbd "<return>") #'agent-dash-remove-image)
     (define-key map [mouse-1] #'agent-dash-remove-image)
     map)
   "Keymap for the staged image removal button.")
@@ -157,17 +162,32 @@ Remote URLs remain placeholders.  No network requests are made here."
   "Return inline previews of IMAGES, separated from surrounding text."
   (when images (concat "\n" (mapconcat #'agent-dash-image-string images "\n") "\n")))
 
-(defun agent-dash-image-attachments-string ()
-  "Return display-only staged previews for the composer."
-  (when agent-dash--attachments
-    (concat
-     (mapconcat
-      (lambda (image)
-        (concat (agent-dash-image-string image) "  "
-                (propertize "× remove" 'agent-dash-image image
-                            'keymap agent-dash-image-remove-map 'mouse-face 'highlight
-                            'help-echo "Click to remove this attachment") "\n"))
-      agent-dash--attachments "") "\n")))
+(defun agent-dash-image--attachment-slots ()
+  "Return the fixed buffer text for the composer's attachment controls."
+  (apply #'concat (make-list agent-dash-image--max-attachments "  \n")))
+
+(defun agent-dash-image--decorate-attachments (start)
+  "Display staged images in the attachment slots beginning at START."
+  (let ((images agent-dash--attachments)
+        (position start))
+    (with-silent-modifications
+      (dotimes (_ agent-dash-image--max-attachments)
+        (let ((image (pop images)))
+          (set-text-properties position (+ position 3)
+                               (list 'read-only t 'front-sticky '(read-only)
+                                     'rear-nonsticky t 'invisible (null image)))
+          (when image
+            (let ((preview (agent-dash-image-string image))
+                  (remove (propertize "  × remove" 'agent-dash-image image
+                                      'keymap agent-dash-image-remove-map
+                                      'mouse-face 'highlight
+                                      'help-echo "RET / click: remove this attachment")))
+              (add-text-properties position (1+ position) (text-properties-at 0 preview))
+              (unless (get-text-property 0 'display preview)
+                (put-text-property position (1+ position) 'display preview))
+              (add-text-properties (1+ position) (+ position 2) (text-properties-at 0 remove))
+              (put-text-property (1+ position) (+ position 2) 'display remove))))
+        (setq position (+ position 3))))))
 
 (defun agent-dash-image--check-chat ()
   "Require a chat whose backend supports images."
@@ -181,7 +201,8 @@ Remote URLs remain placeholders.  No network requests are made here."
   "Validate IMAGE and append it to the current draft without editing its text."
   (agent-dash-image--check-chat)
   (agent-dash-image-bytes image)
-  (when (>= (length agent-dash--attachments) 10) (user-error "At most 10 images per draft"))
+  (when (>= (length agent-dash--attachments) agent-dash-image--max-attachments)
+    (user-error "At most %d images per draft" agent-dash-image--max-attachments))
   (when (> (+ (length (plist-get image :data))
               (apply #'+ (mapcar (lambda (i) (length (plist-get i :data)))
                                  agent-dash--attachments)))
@@ -262,8 +283,12 @@ Remote URLs remain placeholders.  No network requests are made here."
          (window (and (mouse-event-p event) (posn-window (event-end event)))))
     (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
       (unless (memq image agent-dash--attachments) (user-error "This image is not staged"))
-      (setq agent-dash--attachments (remq image agent-dash--attachments))
-      (agent-dash--decorate-input))))
+      (let ((on-attachment (and (not (mouse-event-p event))
+                                (eq image (get-text-property (point) 'agent-dash-image)))))
+        (setq agent-dash--attachments (remq image agent-dash--attachments))
+        (agent-dash--decorate-input)
+        (when (and on-attachment (invisible-p (point)))
+          (agent-dash-focus-input))))))
 
 (defun agent-dash-open-image (&optional event)
   "View the image at EVENT or point, otherwise choose a staged attachment."
@@ -294,9 +319,10 @@ Remote URLs remain placeholders.  No network requests are made here."
     (agent-dash-pop-to-buffer buffer)))
 
 (defun agent-dash-open-image-external ()
-  "Open a staged image with the system default application, without changing it."
+  "Open the image at point or a chosen attachment in the system default app."
   (interactive)
-  (let* ((image (agent-dash-image--choose "Open image externally: "))
+  (let* ((image (or (agent-dash-image--at-event nil)
+                    (agent-dash-image--choose "Open image externally: ")))
          (bytes (agent-dash-image-bytes image))
          (program (unless (eq system-type 'windows-nt)
                     (or (executable-find (if (eq system-type 'darwin) "open" "xdg-open"))

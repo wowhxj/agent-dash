@@ -194,13 +194,10 @@
              (should (string-search "C-c C-k cancel" header-line-format))
              (should (equal (agent-dash--input) "photo"))
              (should (= (char-before agent-dash--input-start) ?\n))
-             (let* ((preview (overlay-get agent-dash--attachment-overlay 'before-string))
-                    (start (string-search "[image:" preview)))
-               (should start)
-               (should (equal (get-text-property start 'agent-dash-image preview)
-                              agent-dash-queue-test-image))
-               (should (equal (get-text-property start 'display preview)
-                              '(image :type png :data "fixture")))))
+             (should (equal (get-text-property agent-dash--attachments-start 'agent-dash-image)
+                            agent-dash-queue-test-image))
+             (should (equal (get-text-property agent-dash--attachments-start 'display)
+                            '(image :type png :data "fixture"))))
          (when (buffer-live-p editor)
            (with-current-buffer editor
              (let ((agent-dash-queue--saved t)) (kill-buffer)))))))))
@@ -427,8 +424,8 @@
            (setq editor (agent-dash-queue-copy))))
        (with-current-buffer editor
          (should (equal (agent-dash--input) "recover me"))
-         (should (string-search "fixture.png"
-                                (overlay-get agent-dash--attachment-overlay 'before-string)))
+         (should (equal (get-text-property agent-dash--attachments-start 'agent-dash-image)
+                        agent-dash-queue-test-image))
          (should (equal agent-dash--attachments (list agent-dash-queue-test-image)))
          (agent-dash-queue-edit-save))
        (should (eq (plist-get entry :status) 'unknown))
