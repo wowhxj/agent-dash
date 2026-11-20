@@ -1267,9 +1267,9 @@ Reuse the existing tab, hub buffer and window.  q returns to the previous tab."
       text)))
 
 (defun agent-dash-hub--reference-choices (rows)
-  "Return aligned completion choices for ROWS within the current window.
+  "Return aligned completion choices for ROWS within the minibuffer window.
 Keep full metadata searchable without displaying it after the table columns."
-  (let* ((width (max 1 (- (window-body-width) 4)))
+  (let* ((width (max 1 (- (window-body-width (minibuffer-window)) 4)))
          (agent-width (if (< width 40) 3 7))
          (id-width (min 12 (max 4 (/ width 10))))
          (date-width (if (< width 56) 10 17))

@@ -233,6 +233,16 @@
            (should (string-search (concat "agent-dash:fake:" id)
                                   (agent-dash-hub-read-reference backend)))))))))
 
+(ert-deftest agent-dash-input-test-reference-width-from-split-window ()
+  (save-window-excursion
+    (delete-other-windows)
+    (select-window (split-window-right))
+    (let* ((row '(:backend fake :id "test" :first "summary" :last "last"))
+           (candidate (caar (agent-dash-hub--reference-choices (list row))))
+           (visible (substring candidate 0 (next-single-property-change 0 'display candidate))))
+      (should (> (string-width visible) (window-body-width)))
+      (should (<= (string-width visible) (- (window-body-width (minibuffer-window)) 4))))))
+
 (ert-deftest agent-dash-input-test-reference-uses-hub-default-visibility ()
   "References exclude Hub-hidden rows, not rows merely missing metadata."
   (agent-dash-input-test-with-chat
