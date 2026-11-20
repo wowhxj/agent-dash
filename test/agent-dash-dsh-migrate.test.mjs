@@ -1,0 +1,41 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, realpathSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { migrate } from '../agent-dash-dsh-migrate.mjs';
+
+test('Claude retirement requires a verified DSH import of unchanged source bytes', t => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'agent-dash-dsh-migration-')));
+  const config = join(home, '.claude'), project = join(home, 'project');
+  const originalConfig = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = config;
+  t.after(() => {
+    if (originalConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = originalConfig;
+    rmSync(home, { recursive: true });
+  });
+  const store = join(config, 'projects', 'example');
+  mkdirSync(store, { recursive: true });
+  mkdirSync(project);
+  const source = join(store, 'example.jsonl');
+  const text = JSON.stringify({type: 'user', sessionId: 'example', message: {role: 'user', content: 'hello'}}) + '\n';
+  writeFileSync(source, text);
+  const args = ['claude', source, 'example', project, join(home, 'pi'), join(home, 'archives')];
+  assert.throws(() => migrate(args, '', () => { throw new Error('Host unavailable'); }), /Host unavailable/);
+  assert.equal(readFileSync(source, 'utf8'), text);
+  const target = { id: 'native-session', workspaceId: 'workspace', cwd: project };
+  const verify = zip => ({ ...target, zipSha256: createHash('sha256').update(readFileSync(zip)).digest('hex') });
+  assert.throws(() => migrate(args, '', zip => ({ ...verify(zip), cwd: home })), /requested workspace/);
+  assert.throws(() => migrate(args, '', () => ({ ...target, zipSha256: 'wrong' })), /did not verify/);
+  const kept = migrate(args, '', zip => { writeFileSync(source, text + '\n'); return verify(zip); });
+  assert.equal(kept.migration, 'retained');
+  assert.ok(existsSync(source));
+  writeFileSync(source, text);
+  const moved = migrate(args, '', verify);
+  assert.equal(moved.id, target.id);
+  assert.equal(moved.migration, 'moved', moved.migrationError);
+  assert.ok(!existsSync(source));
+  assert.equal(readFileSync(moved.archive, 'utf8'), text);
+});

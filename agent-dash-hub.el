@@ -40,6 +40,26 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
     (dsh "dsh" "d") (hermes "Hermes" "m"))
   "Backend, menu label and shortcut key, in menu order.")
 
+(defconst agent-dash-hub--convert-file
+  (expand-file-name "agent-dash-convert.mjs"
+                    (file-name-directory (or load-file-name buffer-file-name))))
+
+(defconst agent-dash-hub--dsh-export-file
+  (expand-file-name "agent-dash-dsh-export.mjs" (file-name-directory agent-dash-hub--convert-file)))
+
+(defconst agent-dash-hub--dsh-migrate-file
+  (expand-file-name "agent-dash-dsh-migrate.mjs"
+                    (file-name-directory agent-dash-hub--convert-file)))
+
+(defvar agent-dash-dsh--host)
+(declare-function agent-dash-dsh--login "agent-dash-dsh")
+(declare-function agent-dash-dsh--call "agent-dash-dsh" (method args &optional retried))
+(defconst agent-dash-hub--convert-sources '(claude codex))
+(defvar agent-dash-pi-sessions-directory)
+(defvar agent-dash-claude-config-directory)
+(declare-function agent-dash-holder-dir "agent-dash-holder")
+(declare-function agent-dash-holder-alive-p "agent-dash-holder")
+
 (defconst agent-dash--reference-regexp
   "@\\[[^]\n]*\\](agent-dash:\\([a-z]+\\):\\([^)\n]+\\))"
   "An @session reference; group 1 is the backend, group 2 the session id.")
@@ -77,6 +97,7 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
 (defvar-local agent-dash-hub--show-hidden nil "Show sessions that are never summarized.")
 (defvar-local agent-dash-hub--grouping nil)
 (defvar-local agent-dash-hub--collapsed nil "Group name -> t when folded.")
+(defvar-local agent-dash-hub--selected nil "Set of selected session keys in this view.")
 (defvar-local agent-dash-hub--marks nil "Row key -> t when marked for deletion.")
 (defvar-local agent-dash-hub--status "" "Header-line text.")
 (defvar-local agent-dash-hub--width nil "Body width used for the last table render.")
@@ -120,12 +141,61 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
                   :missing (and root (not (file-remote-p root)) (not (file-directory-p root))))
             session)))
 
-(defun agent-dash-hub--all ()
-  "Return every loaded row."
-  (let (rows)
+(defvar agent-dash-hub--import-hashes (make-hash-table :test #'equal)
+  "Local file name -> (stat signature . SHA-256) for import comparisons.")
+
+(defun agent-dash-hub--file-hash (file attrs)
+  "Return FILE's literal SHA-256, reusing a digest only for unchanged ATTRS."
+  (let ((stamp (list (file-attribute-size attrs) (file-attribute-modification-time attrs)
+                     (file-attribute-status-change-time attrs) (file-attribute-inode-number attrs)
+                     (file-attribute-device-number attrs)))
+        (cached (gethash file agent-dash-hub--import-hashes)))
+    (if (equal stamp (car cached)) (cdr cached)
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally file)
+        (cdr (puthash file (cons stamp (secure-hash 'sha256 (current-buffer)))
+                      agent-dash-hub--import-hashes))))))
+
+(defun agent-dash-hub--import-matches-p (source target)
+  "Whether TARGET exists and its archived bytes still match SOURCE."
+  (let ((file (plist-get source :file)) (id (plist-get target :id)))
+    (when (and (eq (plist-get source :backend) 'codex)
+               (stringp file) (not (file-remote-p file)) (stringp id)
+               (stringp (plist-get target :file))
+               (string-match-p "\\`[[:alnum:]_.-]+\\'" id)
+               (file-regular-p (plist-get target :file)))
+      (let* ((archive (expand-file-name
+                       (format "conversion-archives/%s-%s.jsonl%s" (plist-get source :backend)
+                               id (if (string-suffix-p ".zst" file) ".zst" ""))
+                       agent-dash-directory))
+             (digest (plist-get (plist-get target :import-source) :sha256))
+             (src (file-attributes file)) (copy (file-attributes archive)))
+        (and src copy (null (file-attribute-type src)) (null (file-attribute-type copy))
+             (= (file-attribute-size src) (file-attribute-size copy))
+             (condition-case nil
+                 (and (equal digest (agent-dash-hub--file-hash file src))
+                      (equal digest (agent-dash-hub--file-hash archive copy)))
+               (file-error nil)))))))
+
+(defun agent-dash-hub--all (&optional replacements)
+  "Return every loaded row, recording verified source -> Pi rows in REPLACEMENTS."
+  (let ((imports (make-hash-table :test #'equal)) rows)
     (dolist (backend agent-dash-backends)
       (setq rows (append rows (plist-get (gethash backend agent-dash-hub--sources) :rows))))
-    rows))
+    (when (memq 'pi agent-dash-backends)
+      (dolist (target (plist-get (gethash 'pi agent-dash-hub--sources) :rows))
+        (when-let* ((source (plist-get target :import-source)))
+          (push target (gethash (format "%s:%s" (plist-get source :backend) (plist-get source :id))
+                                imports)))))
+    (seq-remove
+     (lambda (row)
+       (when-let* ((key (plist-get row :key))
+                   (target (seq-find (lambda (pi-row) (agent-dash-hub--import-matches-p row pi-row))
+                                     (gethash key imports))))
+         (when replacements (puthash key target replacements))
+         t))
+     rows)))
 
 (defun agent-dash-hub--history-updated (backend result)
   "Publish BACKEND's shared reader RESULT, preserving old rows on failure."
@@ -245,8 +315,8 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
   (sort (copy-sequence rows)
         (lambda (a b) (> (or (plist-get a :time) 0) (or (plist-get b :time) 0)))))
 
-(defun agent-dash-hub--visible ()
-  "Return the rows passing the filters, newest first."
+(cl-defun agent-dash-hub--visible (&optional (all (agent-dash-hub--all)))
+  "Return the rows of ALL passing the filters, newest first."
   (agent-dash-hub--newest-first
    (seq-filter
     (lambda (row)
@@ -255,7 +325,7 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
                (string-search agent-dash-hub--project (or (plist-get row :root) "")))
            (or agent-dash-hub--show-hidden (not (agent-dash-summary-skip-reason row)))
            (or (not agent-dash-hub--live-only) (agent-dash-hub-live-p row))))
-    (agent-dash-hub--all))))
+    all)))
 
 (defun agent-dash-hub--group-name (row)
   "Return ROW's group in the current grouping."
@@ -328,7 +398,7 @@ With SHOW-PROJECT, reserve a project column even in narrow windows."
 (defun agent-dash-hub--prefix (layout mark agent live date id project)
   "Format the leading columns with LAYOUT.
 MARK, AGENT, LIVE, DATE, ID and PROJECT are the column texts."
-  (concat (format "  %s %s%s %s %s " mark (agent-dash-hub--column agent 7) live
+  (concat (format " %s %s%s %s %s " mark (agent-dash-hub--column agent 7) live
                   (agent-dash-hub--column date 17)
                   (agent-dash-hub--column id (plist-get layout :id)))
           (when (> (plist-get layout :project) 0)
@@ -352,8 +422,8 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
   (propertize
    (concat (agent-dash-hub--text-columns
             layout
-            (propertize (agent-dash-hub--prefix layout " " "Agent" " " "日期*" "ID" "项目")
-                        'help-echo "日期 *：来源更新/创建时间，不是已验证的消息时间；D=待删除，●=后台实例或已打开")
+            (propertize (agent-dash-hub--prefix layout "  " "Agent" " " "日期*" "ID" "项目")
+                        'help-echo "日期 *：来源更新/创建时间，不是已验证的消息时间；*=已选，D=待删除，●=后台实例或已打开")
             "摘要" "用户末句" "摘要状态")
            (make-string (plist-get layout :status) ?\s) "\n")
    'face 'bold))
@@ -369,7 +439,8 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
      (agent-dash-hub--text-columns
       layout
       (agent-dash-hub--prefix
-       layout (if (gethash (plist-get row :key) agent-dash-hub--marks) "D" " ")
+       layout (concat (if (gethash (plist-get row :key) (agent-dash-hub--selection)) "*" " ")
+                      (if (gethash (plist-get row :key) agent-dash-hub--marks) "D" " "))
        (symbol-name (plist-get row :backend))
        (if (agent-dash-hub-live-p row)
            (propertize "●" 'face 'success 'help-echo "后台实例运行中或聊天已打开")
@@ -386,9 +457,9 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
 
 ;;;; Rendering
 
-(defun agent-dash-hub--status-line (rows)
-  "Return the header-line status for the visible ROWS."
-  (let ((total (length (agent-dash-hub--all))) loading failed warnings)
+(cl-defun agent-dash-hub--status-line (rows &optional (total (length (agent-dash-hub--all))))
+  "Return the header-line status for visible ROWS out of TOTAL."
+  (let (loading failed warnings)
     (dolist (backend agent-dash-backends)
       (when-let* ((notes (plist-get (gethash backend agent-dash-hub--sources) :warnings)))
         (push (format "%s (%d)" backend (length notes)) warnings))
@@ -397,25 +468,69 @@ occupy more pixels than `string-width' predicts in graphical Emacs."
         ('error (push (symbol-name backend) failed))))
     (concat "agent-dash"
             (format "  显示 %d/已载入 %d（过滤/隐藏 %d）" (length rows) total (- total (length rows)))
+            (format "  已选 %d" (if agent-dash-hub--selected
+                                    (hash-table-count agent-dash-hub--selected) 0))
             (if loading (format "  扫描中：%s" (string-join (nreverse loading) ", ")) "")
             (if failed (format "  来源失败：%s  [! 诊断]" (string-join (nreverse failed) ", ")) "")
             (if warnings (format "  读取警告：%s  [! 诊断]"
                                  (string-join (nreverse warnings) ", ")) ""))))
 
+(defvar-local agent-dash-hub--follow-import nil
+  "Single-source conversion and originating view awaiting the destination inventory.")
+
+(defun agent-dash-hub--focus ()
+  "Identify the current row, selection and filters during an asynchronous import."
+  (list (get-text-property (point) 'agent-dash-key)
+        (sort (hash-table-keys (agent-dash-hub--selection)) #'string<)
+        agent-dash-hub--agent agent-dash-hub--project agent-dash-hub--live-only
+        agent-dash-hub--show-hidden agent-dash-hub--grouping))
+
 (defun agent-dash-hub--render ()
-  "Redraw the hub, keeping point on the same row."
-  (let* ((key (get-text-property (point) 'agent-dash-key))
+  "Redraw the hub, keeping point on the same row or its imported session."
+  (let* ((replacements (make-hash-table :test #'equal))
+         (all (agent-dash-hub--all replacements))
+         (key (get-text-property (point) 'agent-dash-key))
+         (follow-source (plist-get agent-dash-hub--follow-import :source))
+         (dest (plist-get agent-dash-hub--follow-import :target))
+         (follow-target (if dest (seq-find (lambda (r) (equal dest (plist-get r :key))) all)
+                          (gethash follow-source replacements)))
+         (target (gethash key replacements))
          (column (current-column))
-         (rows (agent-dash-hub--visible))
+         (rows (progn
+                 (when agent-dash-hub--follow-import
+                   (cond
+                    ((not (equal (plist-get agent-dash-hub--follow-import :focus)
+                                 (agent-dash-hub--focus)))
+                     (setq agent-dash-hub--follow-import nil))
+                    (follow-target
+                     (setq target follow-target agent-dash-hub--follow-import nil)
+                     (when (gethash follow-source (agent-dash-hub--selection))
+                       (remhash follow-source agent-dash-hub--selected)
+                       (puthash (plist-get target :key) t agent-dash-hub--selected))
+                     (when agent-dash-hub--agent
+                       (setq agent-dash-hub--agent (plist-get target :backend)))
+                     (remhash (agent-dash-hub--group-name target) agent-dash-hub--collapsed))))
+                 (agent-dash-hub--visible all)))
          (layout (agent-dash-hub--layout rows))
          (groups (make-hash-table :test #'equal)) order
+         (selected (make-hash-table :test #'equal))
          (inhibit-read-only t))
+    (when target (setq key (plist-get target :key)))
+    (maphash (lambda (source pi-row)
+               (remhash source agent-dash-hub--marks)
+               (when (gethash source (agent-dash-hub--selection))
+                 (puthash (plist-get pi-row :key) t agent-dash-hub--selected)))
+             replacements)
     (dolist (row rows)
       (let ((name (agent-dash-hub--group-name row)))
         (unless (gethash name groups) (push name order))
+        (when (and agent-dash-hub--selected
+                   (gethash (plist-get row :key) agent-dash-hub--selected))
+          (puthash (plist-get row :key) t selected))
         (puthash name (cons row (gethash name groups)) groups)))
-    (setq agent-dash-hub--width (plist-get layout :width)
-          agent-dash-hub--status (agent-dash-hub--status-line rows))
+    (setq agent-dash-hub--selected selected
+          agent-dash-hub--width (plist-get layout :width)
+          agent-dash-hub--status (agent-dash-hub--status-line rows (length all)))
     (erase-buffer)
     (insert (propertize "Agent Session Hub\n" 'face 'bold))
     (insert (format "分组:%s  agent:%s  项目:%s  摘要范围:%s  仅存活:%s\n\n"
@@ -528,6 +643,46 @@ Keep old rows usable while loading.  Repeated requests share active workers."
 (defun agent-dash-hub--row-at-point ()
   "Return the row at point, or signal."
   (or (get-text-property (point) 'agent-dash-row) (user-error "请先选择一条会话")))
+
+(defun agent-dash-hub--selection ()
+  "Return the selection table, including in Hub buffers opened before reload."
+  (or agent-dash-hub--selected
+      (setq agent-dash-hub--selected (make-hash-table :test #'equal))))
+
+(defun agent-dash-hub-toggle-selection ()
+  "Toggle selection of the current row and advance to the next session."
+  (interactive)
+  (let ((key (plist-get (agent-dash-hub--row-at-point) :key))
+        (selected (agent-dash-hub--selection)))
+    (if (gethash key selected)
+        (remhash key selected)
+      (puthash key t selected))
+    (when-let* ((next (save-excursion
+                        (forward-line 1)
+                        (text-property-not-all (point) (point-max) 'agent-dash-row nil))))
+      (goto-char next))
+    (agent-dash-hub--render)))
+
+(defun agent-dash-hub-select-all ()
+  "Select every loaded session passing the filters, including folded rows."
+  (interactive)
+  (let ((selected (agent-dash-hub--selection)))
+    (dolist (row (agent-dash-hub--visible))
+      (puthash (plist-get row :key) t selected)))
+  (agent-dash-hub--render))
+
+(defun agent-dash-hub-clear-selection ()
+  "Clear this Hub's selection."
+  (interactive)
+  (clrhash (agent-dash-hub--selection))
+  (agent-dash-hub--render))
+
+(defun agent-dash-hub--action-rows ()
+  "Return selected sessions in this view, or the session at point."
+  (if (and agent-dash-hub--selected (> (hash-table-count agent-dash-hub--selected) 0))
+      (seq-filter (lambda (row) (gethash (plist-get row :key) agent-dash-hub--selected))
+                  (agent-dash-hub--visible))
+    (list (agent-dash-hub--row-at-point))))
 
 (defun agent-dash-hub--goto (key)
   "Move to the row or group KEY."
@@ -770,44 +925,434 @@ Candidates keep the list order and show the table header as their group."
     (kill-new root)
     (message "已复制项目路径：%s" root)))
 
-(defun agent-dash-hub-mark-delete ()
-  "Mark the session at point for deletion and move on."
+(defun agent-dash-hub--convert-command (row &optional destination)
+  "Build the command for ROW and DESTINATION (nil for Pi, `dsh' or `export')."
+  (let ((source (plist-get row :file)) (root (plist-get row :root))
+        (backend (plist-get row :backend)))
+    (unless (memq backend agent-dash-hub--convert-sources)
+      (user-error "不支持从 %s 转换" backend))
+    (unless (and source (file-name-absolute-p source) (not (file-remote-p source))
+                 (file-regular-p source) (file-readable-p source))
+      (user-error "找不到可读的本地会话文件：%s" source))
+    (unless (and root (file-name-absolute-p root) (not (file-remote-p root)))
+      (user-error "缺少本地项目路径：%s" root))
+    (let ((migrate (and (eq backend 'claude) (not (eq destination 'export)))))
+      (when (and migrate
+                 (or (agent-dash-hub-live-p row)
+                     (agent-dash-holder-alive-p
+                      (agent-dash-holder-dir backend (plist-get row :id)))))
+        (user-error "%s 正在运行或已打开，请关闭后再迁移" (plist-get row :key)))
+      (append (list "node" (pcase destination
+                             ('dsh agent-dash-hub--dsh-migrate-file)
+                             ('export agent-dash-hub--dsh-export-file)
+                             (_ agent-dash-hub--convert-file))
+                    (symbol-name backend) (expand-file-name source) (plist-get row :id)
+                    (expand-file-name root) (expand-file-name agent-dash-pi-sessions-directory)
+                    (expand-file-name "conversion-archives" agent-dash-directory))
+              (when (and migrate (null destination)) '("--migrate-claude"))))))
+
+(defun agent-dash-hub--convert-result (text destination)
+  "Decode converter output TEXT for DESTINATION into callback arguments."
+  (let* ((reply (agent-dash-json-read text))
+         (file (agent-dash-jget reply "file"))
+         (id (agent-dash-jget reply "id"))
+         (archive (agent-dash-jget reply "archive"))
+         (warnings (agent-dash-jget reply "warnings"))
+         (notes (agent-dash-jget reply "notes"))
+         (migration (agent-dash-jget reply "migration")))
+    (unless (and (stringp file) (stringp id) (stringp archive))
+      (error "转换器返回的会话信息不完整"))
+    (list (or migration t)
+          (propertize
+           (concat (pcase destination
+                     ('dsh (format "DSH 会话 %s\n  导入包 %s" id file))
+                     ('export (format "导入包 %s" file))
+                     (_ (format "%s  %s" id file)))
+                   (format "\n  归档 %s" archive)
+                   (when-let* ((workspace (agent-dash-jget reply "workspaceId")))
+                     (format "\n  工作区 %s" workspace))
+                   (pcase migration
+                     ("moved" "\n  Claude 原件已迁出")
+                     ("retained"
+                      (format "\n  ⚠ %s，Claude 原件保留：%s"
+                              (if (eq destination 'dsh) "DSH 会话已验证" "Pi 已生成")
+                              (agent-dash-jget reply "migrationError"))))
+                   (mapconcat (lambda (w) (format "\n  ⚠ %s" w)) warnings "")
+                   (when notes
+                     (format "\n  仅归档：%d 类记录\n    %s" (length notes)
+                             (string-join notes "\n    "))))
+           'agent-dash-warnings warnings)
+          id)))
+
+(defun agent-dash-hub--convert-one (row done &optional destination)
+  "Convert ROW to DESTINATION, then call DONE with status, details and id."
+  (let* ((command (agent-dash-hub--convert-command row destination))
+         (credentials
+          (when (eq destination 'dsh)
+            (require 'agent-dash-dsh)
+            (if agent-dash-dsh--host
+                (agent-dash-dsh--call "deepseekChatImport/limits" (make-hash-table))
+              (agent-dash-dsh--login))
+            (json-serialize agent-dash-dsh--host)))
+         (process-environment
+          (if (and (eq (plist-get row :backend) 'claude) (not (eq destination 'export)))
+              (cons (concat "CLAUDE_CONFIG_DIR="
+                            (expand-file-name agent-dash-claude-config-directory))
+                    process-environment)
+            process-environment))
+         (output (generate-new-buffer " *agent-dash-converter*"))
+         (errors (generate-new-buffer " *agent-dash-converter-errors*"))
+         (default-directory (file-name-directory agent-dash-hub--convert-file))
+         process)
+    (condition-case err
+        (progn
+          (setq process
+                (make-process
+                 :name "agent-dash-converter" :command command :buffer output :stderr errors
+                 :connection-type 'pipe :coding 'utf-8-unix :noquery t
+                 :sentinel
+                 (lambda (proc event)
+                   (when (memq (process-status proc) '(exit signal))
+                     (let ((result
+                            (condition-case failure
+                                (if (zerop (process-exit-status proc))
+                                    (with-current-buffer output
+                                      (agent-dash-hub--convert-result (buffer-string) destination))
+                                  (list nil (format "%s %s" (string-trim event)
+                                                    (with-current-buffer errors
+                                                      (string-trim (buffer-string))))))
+                              (error (list nil (error-message-string failure))))))
+                       (kill-buffer output)
+                       (kill-buffer errors)
+                       (apply done result))))))
+          (when credentials
+            (process-send-string process credentials)
+            (process-send-eof process))
+          process)
+      (error
+       (when process (set-process-sentinel process #'ignore) (delete-process process))
+       (kill-buffer output) (kill-buffer errors) (signal (car err) (cdr err))))))
+
+(defun agent-dash-hub--reload-after-conversion (backend &optional callback)
+  "Load BACKEND after any pre-conversion reader, then call CALLBACK."
+  (if (gethash (list backend 'sessions nil) agent-dash-history--jobs)
+      (agent-dash-history-request backend 'sessions
+                                  (lambda (_) (agent-dash-hub--load backend callback)))
+    (agent-dash-hub--load backend callback)))
+
+(defvar-local agent-dash-hub--report-total 0)
+(defvar-local agent-dash-hub--report-success 0)
+(defvar-local agent-dash-hub--report-failed 0)
+(defvar-local agent-dash-hub--report-kept 0)
+(defvar-local agent-dash-hub--report-warned 0)
+
+(define-derived-mode agent-dash-hub-report-mode special-mode "转换报告"
+  "View the results of a Hub conversion batch.")
+
+(defun agent-dash-hub-report-toggle ()
+  "Expand or collapse the conversion under point."
   (interactive)
-  (let ((row (agent-dash-hub--row-at-point)))
-    (unless (plist-get (agent-dash-backend-capabilities (plist-get row :backend)) :delete)
-      (user-error "%s 会话不支持删除" (plist-get row :backend)))
-    (when (agent-dash-hub-live-p row) (user-error "会话正在运行或已打开，不能删除"))
-    (puthash (plist-get row :key) t agent-dash-hub--marks)
-    (agent-dash-hub-next-entry)
-    (let ((key (get-text-property (point) 'agent-dash-key)))
-      (agent-dash-hub--render)
-      (agent-dash-hub--goto key))
-    (message "已标记删除；u 取消标记，x 确认执行")))
+  (let ((detail (or (get-text-property (line-beginning-position) 'agent-dash-detail)
+                    (seq-find (lambda (o) (overlay-get o 'agent-dash-detail))
+                              (overlays-at (point))))))
+    (when detail
+      (goto-char (overlay-start detail))
+      (forward-line -1)
+      (overlay-put detail 'invisible (not (overlay-get detail 'invisible))))))
+
+(dolist (key '("RET" "TAB" "<tab>"))
+  (define-key agent-dash-hub-report-mode-map (kbd key) #'agent-dash-hub-report-toggle))
+
+(defun agent-dash-hub--report-warning (warning)
+  "Summarize one converter WARNING for a collapsed row."
+  (cond
+   ;; Older reports mixed administrative records with conversion warnings.
+   ((string-match-p
+     (rx (or (seq "Claude " (or "last-prompt" "mode" "permission-mode" "metadata user"
+                                "file-history-snapshot" "atis-latch" "api-request" "cost-state"
+                                "session-owner" "ai-title" "tools-used" "file-history-delta"
+                                "worktree-state" "relocated") " record")
+             (seq "attachment " (or "hook_success" "environment" "model" "output_style_instructions"
+                                    "deferred_tools_delta" "agent_listing_delta"
+                                    "mcp_instructions_delta"
+                                    "skill_listing" "total_tokens_reminder" "output_style"
+                                    "hook_additional_context"
+                                    "instructions" "session_context" "date" "credential_org"
+                                    "remote_session_change" "prompt_snapshot" "auto_mode"
+                                    "silent_turn_reminder"
+                                    "deferred_tools_record" "command_permissions") word-end)))
+     warning) nil)
+   ((string-match-p "inactive Claude branch\\|outside the final parentUuid chain" warning)
+    (format "当前上下文外%s条记录仅归档%s"
+            (if (string-match "(\\([0-9]+\\))\\'" warning) (match-string 1 warning) "部分")
+            (if (string-match-p "compact_boundary" warning) "（含压缩前历史或其他分支）" "")))
+   ((string-match-p "sidechain" warning) "旁支记录仅归档")
+   ((string-match-p "tool calls and results rendered" warning) "工具记录转为文本")
+   ((string-match-p "archived .*tool" warning) "部分工具记录仅归档")
+   ((string-match-p "attachment\\|Source image\\|archived content block .*image" warning)
+    "部分附件仅归档")
+   ((string-match-p "replacement_history" warning) "早期历史仅归档，已恢复压缩后的上下文")
+   ((string-match-p "encrypted" warning) "加密内容仅归档")
+   ((string-match-p "archived Claude system" warning) "系统记录仅归档")
+   ((string-match-p "archived\\|only in original archive" warning) "部分记录仅归档")
+   ((string-match-p "missing assistant\\|attributes imported replies" warning) "模型或用量信息不完整")
+   ((string-match-p "reasoning rendered" warning) "推理记录转为文本")
+   (t "其他警示见详情")))
+
+(defun agent-dash-hub--report-start (action total)
+  "Initialize the current report for ACTION on TOTAL sessions."
+  (agent-dash-hub-report-mode)
+  (setq agent-dash-hub--report-total total)
+  (let ((inhibit-read-only t))
+    (insert (format "%s · %d 条 · 进行中\nRET / TAB 展开或收起当前条目\n" action total))
+    (when (equal action "导出 DSH 导入包")
+      (insert "在 DSH 中打开「DeepSeek 网站」导入器，展开条目查看 ZIP，选择目标工作区。\n"))
+    (goto-char (point-min))))
+
+(defun agent-dash-hub--report-add (row target ok text id warnings)
+  "Append ROW's result for TARGET, with status OK, TEXT, ID and WARNINGS."
+  (let* ((inhibit-read-only t)
+         (source (plist-get row :id)) (backend (plist-get row :backend))
+         (kept (and ok (not (equal ok "moved"))))
+         (labels (delq nil (delete-dups (mapcar #'agent-dash-hub--report-warning warnings))))
+         (priorities '("当前上下文外" "旁支" "部分工具" "工具记录" "部分附件"))
+         (rank (lambda (label)
+                 (or (cl-position-if (lambda (p) (string-prefix-p p label)) priorities)
+                     (length priorities))))
+         (warned (or labels (equal ok "retained"))))
+    (setq labels (cl-stable-sort labels #'< :key rank))
+    (when (string-match-p "Claude 源记录包含本地命令，未发现普通问答" text)
+      (push "仅本地命令，未发现普通问答" labels))
+    (if ok (cl-incf agent-dash-hub--report-success) (cl-incf agent-dash-hub--report-failed))
+    (when kept (cl-incf agent-dash-hub--report-kept))
+    (when warned (cl-incf agent-dash-hub--report-warned))
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward " 条 · ")
+      (delete-region (point) (line-end-position))
+      (insert (format "%s · 成功 %d，失败 %d，成功项中源保留 %d，有警示 %d 条"
+                      (if (= agent-dash-hub--report-total
+                             (+ agent-dash-hub--report-success agent-dash-hub--report-failed))
+                          "完成" "进行中")
+                      agent-dash-hub--report-success agent-dash-hub--report-failed
+                      agent-dash-hub--report-kept agent-dash-hub--report-warned))
+      (goto-char (point-max))
+      (let ((start (point)))
+        (insert (format "%s %s → %s:%s  %s"
+                        (cond ((null ok) "✗") ((equal ok "retained") "⚠") (t "✓"))
+                        (if (and backend source)
+                            (format "%s:%s" backend (agent-dash--one-line source 9))
+                          (plist-get row :key))
+                        target (if id (agent-dash--one-line id 9) "—")
+                        (cond ((not ok)
+                               (concat "失败 · " (agent-dash--one-line
+                                                  (car (split-string text "Original archived at "))
+                                                  100)))
+                              ((equal ok "retained") "迁出未完成，源保留")
+                              (kept "源保留") (t "已迁出"))))
+        (when labels (insert " · " (string-join (seq-take labels 2) "、")))
+        (insert "\n")
+        (let ((body (point)))
+          (when source (insert (format "  来源 %s:%s\n" backend source)))
+          (when-let* ((file (plist-get row :file))) (insert "  源文件 " file "\n"))
+          (when id (insert (format "  目标 %s:%s\n" target id)))
+          (insert "  " text "\n")
+          (let ((detail (make-overlay body (point))))
+            (overlay-put detail 'invisible t)
+            (overlay-put detail 'agent-dash-detail t)
+            (put-text-property start body 'agent-dash-detail detail)))))))
+
+(defun agent-dash-hub-compact-report ()
+  "Fold a completed legacy conversion report in the current buffer."
+  (interactive)
+  (unless (derived-mode-p 'agent-dash-hub-report-mode)
+    (let (action total entries)
+      (save-excursion
+        (goto-char (point-min))
+        (unless (looking-at "^\\(转换到 Pi\\|导入 DSH\\|导出 DSH 导入包\\) · \\([0-9]+\\) 条$")
+          (user-error "当前缓冲区不是旧版转换报告"))
+        (setq action (match-string 1) total (string-to-number (match-string 2)))
+        (let ((header "^\\([✓⚠✗]\\) \\(claude\\|codex\\):\\([^ \n]+\\)  "))
+          (while (re-search-forward header nil t)
+            (let* ((status (match-string 1)) (backend (match-string 2)) (source (match-string 3))
+                   (text (buffer-substring
+                          (point) (save-excursion
+                                    (if (re-search-forward header nil t)
+                                        (max (point-min) (1- (line-beginning-position)))
+                                      (point-max)))))
+                   (ok (cond ((equal status "✗") nil) ((equal status "⚠") "retained")
+                             ((string-match-p "\n  Claude 原件已迁出" text) "moved") (t t)))
+                   (target (pcase action ("转换到 Pi" "pi") ("导入 DSH" "dsh") (_ "ZIP")))
+                   (id (and ok (pcase target
+                                 ("pi" (and (string-match "\\`\\([^ \n]+\\)  " text)
+                                            (match-string 1 text)))
+                                 ("dsh" (and (string-match "\\`DSH 会话 \\([^ \n]+\\)" text)
+                                             (match-string 1 text))))))
+                   warnings)
+              (dolist (line (split-string text "\n"))
+                (when (and (string-prefix-p "  ⚠ " line)
+                           (not (string-match-p "Claude 原件保留：" line)))
+                  (push (substring line 4) warnings)))
+              (push (list (list :backend backend :id source) target ok
+                          (string-trim-right text) id (nreverse warnings)) entries)))))
+      (unless (= (length entries) total) (user-error "报告未写完或格式不匹配"))
+      (let ((inhibit-read-only t))
+        (atomic-change-group
+          (erase-buffer)
+          (agent-dash-hub--report-start action total)
+          (dolist (entry (nreverse entries)) (apply #'agent-dash-hub--report-add entry)))))))
+
+(defun agent-dash-hub--convert-rows (rows &optional destination)
+  "Convert ROWS serially to DESTINATION (nil for Pi, `dsh' or `export')."
+  (unless rows (user-error "没有可转换的会话"))
+  (let* ((action (pcase destination ('dsh "导入 DSH") ('export "导出 DSH 导入包") (_ "转换到 Pi")))
+         (backend (or destination 'pi))
+         (report (generate-new-buffer (format "*Agent Dash · %s*" action)))
+         (success 0) (retained 0) moved (total (length rows))
+         (hub (current-buffer))
+         (source (plist-get (car rows) :key))
+         (follow (and (not (eq destination 'export)) (= total 1)
+                      (derived-mode-p 'agent-dash-hub-mode)
+                      (or (equal source (get-text-property (point) 'agent-dash-key))
+                          (gethash source (agent-dash-hub--selection)))
+                      (list :source source :focus (agent-dash-hub--focus)))))
+    (with-current-buffer report
+      (agent-dash-hub--report-start action total))
+    (display-buffer report)
+    (cl-labels
+        ((next ()
+           (if-let* ((row (pop rows)))
+               (let ((done (lambda (ok text &optional id)
+                             (when ok
+                               (cl-incf success)
+                               (when (and follow id)
+                                 (setq follow (plist-put follow :target
+                                                         (format "%s:%s" backend id)))))
+                             (pcase ok
+                               ("retained" (cl-incf retained)
+                                (unless (eq destination 'dsh) (setq follow nil)))
+                               ("moved" (push (plist-get row :key) moved)))
+                             (when (buffer-live-p report)
+                               (with-current-buffer report
+                                 (agent-dash-hub--report-add
+                                  row (if (eq backend 'export) "ZIP" backend) ok text id
+                                  (and (> (length text) 0)
+                                       (get-text-property 0 'agent-dash-warnings text)))))
+                             (run-at-time 0 nil #'next))))
+                 (condition-case err (agent-dash-hub--convert-one row done destination)
+                   (error (funcall done nil (error-message-string err)))))
+             (when (and (> success 0) (not (eq destination 'export)))
+               (when (and follow (buffer-live-p hub))
+                 (with-current-buffer hub (setq agent-dash-hub--follow-import follow)))
+               (agent-dash-hub--reload-after-conversion
+                backend
+                (lambda (_result)
+                  (when (and follow (buffer-live-p hub))
+                    (with-current-buffer hub
+                      (when (eq follow agent-dash-hub--follow-import)
+                        (agent-dash-hub--render)
+                        (setq agent-dash-hub--follow-import nil))))
+                  (when (or moved (and (eq destination 'dsh) (> retained 0)))
+                    (when (buffer-live-p hub)
+                      (with-current-buffer hub
+                        (when agent-dash-hub--marks
+                          (dolist (key moved) (remhash key agent-dash-hub--marks)))))
+                    (agent-dash-hub--reload-after-conversion 'claude)))))
+             (message "%s完成：成功 %d，失败 %d%s" action success (- total success)
+                      (if (or moved (> retained 0))
+                          (format "，Claude 原件已迁出 %d、已保留 %d" (length moved) retained)
+                        "")))))
+      (next))
+    report))
+
+(defun agent-dash-hub-convert-session ()
+  "Convert selected sessions, or the session at point, to Pi."
+  (interactive)
+  (agent-dash-hub--convert-rows (agent-dash-hub--action-rows)))
+
+(defun agent-dash-hub-import-dsh ()
+  "Import selected sessions, or the session at point, into the configured DSH Host."
+  (interactive)
+  (agent-dash-hub--convert-rows (agent-dash-hub--action-rows) 'dsh))
+
+(defun agent-dash-hub-export-dsh ()
+  "Export selected sessions, or the session at point, for DSH import."
+  (interactive)
+  (agent-dash-hub--convert-rows (agent-dash-hub--action-rows) 'export))
+
+(defun agent-dash-hub-convert-project ()
+  "Convert all loaded Claude and Codex sessions in the project at point."
+  (interactive)
+  (let ((root (or (get-text-property (point) 'agent-dash-project-root)
+                  (plist-get (agent-dash-hub--row-at-point) :root)
+                  (user-error "该会话未记录项目目录"))))
+    (agent-dash-hub--convert-rows
+     (seq-filter (lambda (row)
+                   (and (equal root (plist-get row :root))
+                        (memq (plist-get row :backend) agent-dash-hub--convert-sources)))
+                 (agent-dash-hub--all)))))
+
+(defun agent-dash-hub-convert-backend (backend)
+  "Convert all loaded sessions from BACKEND to Pi."
+  (interactive (list (intern (completing-read "转换哪个后端到 Pi？ "
+                                              agent-dash-hub--convert-sources nil t))))
+  (agent-dash-hub--convert-rows
+   (seq-filter (lambda (row) (eq (plist-get row :backend) backend)) (agent-dash-hub--all))))
+
+(defun agent-dash-hub--check-deletable (row)
+  "Signal if ROW is live or its backend does not support deletion."
+  (unless (plist-get (agent-dash-backend-capabilities (plist-get row :backend)) :delete)
+    (user-error "%s 会话不支持删除" (plist-get row :backend)))
+  (when (agent-dash-hub-live-p row)
+    (user-error "%s 正在运行或已打开，不能删除" (plist-get row :key))))
+
+(defun agent-dash-hub-mark-delete ()
+  "Mark selected sessions, or the session at point, after checking every row."
+  (interactive)
+  (let ((rows (agent-dash-hub--action-rows)))
+    (unless rows (user-error "选中的会话已不在当前筛选中"))
+    (mapc #'agent-dash-hub--check-deletable rows)
+    (dolist (row rows) (puthash (plist-get row :key) t agent-dash-hub--marks))
+    (when (zerop (hash-table-count (agent-dash-hub--selection))) (agent-dash-hub-next-entry))
+    (agent-dash-hub--render)
+    (message "已标记 %d 条待删除；u 取消当前行标记，x 确认执行" (length rows))))
 
 (defun agent-dash-hub-unmark-delete ()
-  "Remove the deletion mark of the session at point."
+  "Clear selection and any pending deletion mark on the session at point."
   (interactive)
-  (remhash (plist-get (agent-dash-hub--row-at-point) :key) agent-dash-hub--marks)
+  (let ((key (plist-get (agent-dash-hub--row-at-point) :key)))
+    (remhash key (agent-dash-hub--selection))
+    (remhash key agent-dash-hub--marks))
   (agent-dash-hub--render))
 
 (defun agent-dash-hub-execute-deletions ()
   "Permanently delete the marked sessions after confirmation."
   (interactive)
-  (let ((marked (seq-filter (lambda (row) (gethash (plist-get row :key) agent-dash-hub--marks))
-                            (agent-dash-hub--all))))
-    (unless marked (user-error "没有标记待删除的会话"))
-    (unless (yes-or-no-p (format "永久删除 %d 个会话（不可撤销）? " (length marked)))
-      (user-error "已取消删除"))
-    (dolist (row marked)
-      (agent-dash-backend-delete (plist-get row :backend) row)
-      (agent-dash-summary-forget row)
-      (remhash (plist-get row :key) agent-dash-hub--marks)
-      (let ((source (gethash (plist-get row :backend) agent-dash-hub--sources)))
-        (puthash (plist-get row :backend)
-                 (plist-put source :rows (delq row (plist-get source :rows)))
-                 agent-dash-hub--sources)))
-    (agent-dash-hub--render)
-    (message "已永久删除 %d 个会话" (length marked))))
+  (let* ((confirmed (make-hash-table :test #'equal))
+         (marked-p (lambda (row) (gethash (plist-get row :key) confirmed))))
+    (dolist (row (agent-dash-hub--all))
+      (let ((key (plist-get row :key)))
+        (when (gethash key agent-dash-hub--marks) (puthash key t confirmed))))
+    (let* ((count (hash-table-count confirmed))
+           (outside (- count (seq-count marked-p (agent-dash-hub--visible)))))
+      (when (zerop count) (user-error "没有标记待删除的会话"))
+      (unless (yes-or-no-p (format "永久删除 %d 个标记会话（筛选外 %d 个，不可撤销）? " count outside))
+        (user-error "已取消删除"))
+      ;; A reader can publish new rows while the confirmation prompt is open.
+      (let ((marked (seq-filter marked-p (agent-dash-hub--all))))
+        (unless (= count (length marked)) (user-error "会话列表已变更，请重新确认"))
+        (mapc #'agent-dash-hub--check-deletable marked)
+        (unwind-protect
+            (dolist (row marked)
+              (agent-dash-backend-delete (plist-get row :backend) row)
+              (remhash (plist-get row :key) agent-dash-hub--marks)
+              (let ((source (gethash (plist-get row :backend) agent-dash-hub--sources)))
+                (puthash (plist-get row :backend)
+                         (plist-put source :rows (delq row (plist-get source :rows)))
+                         agent-dash-hub--sources))
+              (agent-dash-summary-forget row))
+          (agent-dash-hub--render)))
+      (message "已永久删除 %d 个会话" count))))
 
 (defun agent-dash-hub-relocate-project (old new)
   "Show and open sessions recorded under directory OLD from NEW."
@@ -1074,6 +1619,8 @@ whole original conversation."
   "Return the menu description of view FIELD."
   (with-current-buffer transient--original-buffer
     (pcase field
+      ('convert (let ((count (hash-table-count (agent-dash-hub--selection))))
+                  (if (> count 0) (format "转换已选的 %d 条会话" count) "转换光标所在会话")))
       ('agent (format "筛选（Agent：%s）" (or agent-dash-hub--agent "全部")))
       ('project (format "项目：%s" (agent-dash--one-line (or agent-dash-hub--project "全部") 32)))
       ('live (format "仅 live：%s" (if agent-dash-hub--live-only "开" "关")))
@@ -1150,6 +1697,19 @@ whole original conversation."
     ("c" "恢复默认" agent-dash-hub-clear-filters)
     ("q" "关闭 / 返回" transient-quit-one :transient nil)]])
 
+(transient-define-prefix agent-dash-hub-convert-menu ()
+  "Choose the scope of a native session conversion."
+  :display-action agent-dash-hub--display
+  [[:description (lambda () (agent-dash-hub--describe 'convert))
+                 ("s" "转到 Pi（Claude 原件迁出并归档）" agent-dash-hub-convert-session)
+                 ("d" "导入 DSH（Claude 原件验证后迁出）" agent-dash-hub-import-dsh)
+                 ("e" "仅导出 DSH 包" agent-dash-hub-export-dsh)]
+   ["批量转到 Pi（Claude 原件迁出并归档）"
+    ("p" "当前项目的全部已加载会话" agent-dash-hub-convert-project)
+    ("b" "指定后端的全部已加载会话" agent-dash-hub-convert-backend)]
+   ["返回"
+    ("q" "关闭菜单" transient-quit-one :transient nil)]])
+
 (transient-define-prefix agent-dash-hub-help-menu ()
   "Hub commands; the same keys work directly in the list."
   :variable-pitch t
@@ -1180,9 +1740,13 @@ whole original conversation."
     ("t" "时间 / 项目" agent-dash-hub-sort-by-time)
     ("c" "恢复默认" agent-dash-hub-clear-filters)]
    ["管理"
-    ("d" "标记删除" agent-dash-hub-mark-delete)
-    ("u" "取消标记" agent-dash-hub-unmark-delete)
+    ("m" "切换选中并前进" agent-dash-hub-toggle-selection :transient t)
+    ("M" "全选当前筛选（含折叠）" agent-dash-hub-select-all :transient t)
+    ("U" "清空选择" agent-dash-hub-clear-selection :transient t)
+    ("d" "标记已选 / 当前行待删除" agent-dash-hub-mark-delete)
+    ("u" "清除当前行的选择和待删标记" agent-dash-hub-unmark-delete)
     ("x" "确认删除" agent-dash-hub-execute-deletions)
+    ("v" "转换会话" agent-dash-hub-convert-menu)
     ("D" "项目重定向" agent-dash-hub-relocate-project)
     ("!" "诊断" agent-dash-hub-diagnostics)]
    ["其他"
@@ -1220,6 +1784,11 @@ whole original conversation."
     map)
   "Keymap for `agent-dash-hub-mode'.")
 
+(define-key agent-dash-hub-mode-map (kbd "v") #'agent-dash-hub-convert-menu)
+(define-key agent-dash-hub-mode-map (kbd "m") #'agent-dash-hub-toggle-selection)
+(define-key agent-dash-hub-mode-map (kbd "M") #'agent-dash-hub-select-all)
+(define-key agent-dash-hub-mode-map (kbd "U") #'agent-dash-hub-clear-selection)
+
 (define-derived-mode agent-dash-hub-mode special-mode "Agent-Hub"
   "Saved sessions of every agent.
 
@@ -1228,9 +1797,13 @@ f 会话视图菜单；a Agent 筛选；P 项目筛选；l 仅存活；f h 显�
 t 时间倒序/项目分组；f g 按 Agent 分组；c 恢复默认；g 刷新。
 TAB 折叠/展开当前分组；Shift-TAB 全部折叠/展开。
 i 详情/对话；s 语义搜索/问答；r 生成摘要；R 重试失败摘要（需 `agent-dash-summary-mode'）。
-d 标记删除；u 取消；x 执行删除（Claude/Pi）；D 项目目录重定向；! 诊断。
+m 切换选中并移到下一会话；M 全选当前筛选的已加载会话（含折叠）；U 清空选择。
+v s 转换到 Pi；v d 导出 DSH 包；均优先处理选集，空选集处理当前行。
+v p 转换当前项目；v b 转换指定后端。
+d 标记已选会话或当前行待删除；u 清除当前行选择和删除标记；x 确认执行全部删除标记。
+D 项目目录重定向；! 诊断。
 w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
-列：D=待删除，●=后台实例或已打开；日期 * 表示来源时间，不是消息时间。
+列：*=已选，D=待删除，●=后台实例或已打开；日期 * 表示来源时间，不是消息时间。
 
 \\{agent-dash-hub-mode-map}"
   (setq-local truncate-lines t)
@@ -1239,6 +1812,7 @@ w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
                                   (if (string-search "来源失败" agent-dash-hub--status)
                                       'warning 'mode-line))))
   (setq agent-dash-hub--collapsed (make-hash-table :test #'equal)
+        agent-dash-hub--selected (make-hash-table :test #'equal)
         agent-dash-hub--marks (make-hash-table :test #'equal)
         agent-dash-hub--grouping agent-dash-hub-group-by)
   (add-hook 'post-command-hook #'agent-dash-hub--highlight nil t)

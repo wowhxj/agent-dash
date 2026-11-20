@@ -131,5 +131,43 @@
             (agent-dash-test-wait (lambda () (not (agent-dash-holder-alive-p dir)))))
         (delete-directory agent-dash-claude-config-directory t)))))
 
+(ert-deftest agent-dash-claude-test-history-cwd-independent-of-prompts ()
+  (let ((file (make-temp-file "dash-claude-cwd-" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (dolist (type '("assistant" "system" "attachment" "user"))
+            (with-temp-file file
+              (insert "{\"type\":\"assistant\",\"message\":{\"cwd\":\"/nested\"}}\n"
+                      "{\"type\":\"assistant\",\"isSidechain\":true,\"cwd\":\"/child\"}\n"
+                      "{\"type\":\"system\",\"cwd\":\"relative\"}\n"
+                      (json-encode (list :type type :cwd "/tmp/project-a" :isMeta t)) "\n"
+                      "{\"type\":\"user\",\"message\":{\"content\":\"<command-name>/clear\"}}\n"))
+            (let ((row (agent-dash-claude--session-info file)))
+              (should (equal (plist-get row :root) "/tmp/project-a"))
+              (should (plist-get row :empty))
+              (should-not (plist-get row :first))
+              (should-not (plist-get row :last))))
+          (with-temp-file file
+            (insert "{\"type\":\"attachment\",\"message\":"
+                    "{\"type\":\"user\",\"content\":\"nested\"}}\n"
+                    "{\"type\": \"user\",\"message\":{\"content\":\"human\"}}\n"))
+          (let ((row (agent-dash-claude--session-info file)))
+            (should-not (plist-get row :root))
+            (should (equal (plist-get row :first) "human"))
+            (should (equal (plist-get row :last) "human"))))
+      (delete-file file))))
+
+(ert-deftest agent-dash-claude-test-project-directory-collision ()
+  (let* ((agent-dash-claude-config-directory (make-temp-file "dash-claude-config-" t))
+         (root "/tmp/project/a")
+         (file (agent-dash-claude--transcript root "one")))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file (insert "{\"type\":\"system\",\"cwd\":\"/tmp/project/a\"}\n"))
+          (should (= 1 (length (agent-dash-backend-sessions 'claude (concat root "/")))))
+          (should-not (agent-dash-backend-sessions 'claude "/tmp/project-a")))
+      (delete-directory agent-dash-claude-config-directory t))))
+
 (provide 'agent-dash-claude-test)
 ;;; agent-dash-claude-test.el ends here

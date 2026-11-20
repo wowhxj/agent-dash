@@ -641,16 +641,34 @@ Never kill a busy/unsaved session or launch before the old holder has exited."
     (let ((text (agent-dash-pi--blocks-text content)))
       (if (and (string-blank-p text) (agent-dash-images-from-blocks content)) "[image]" text))))
 
+(defun agent-dash-pi--import-source (line)
+  "Return lightweight import provenance from the second record LINE."
+  (when (and line (string-search "agent-dash-import" line))
+    (let* ((entry (condition-case nil (agent-dash-json-read line) (json-error nil)))
+           (backend (agent-dash-jget entry "data" "backend"))
+           (id (agent-dash-jget entry "data" "sourceId"))
+           (digest (agent-dash-jget entry "data" "sha256")))
+      (when (and (equal (agent-dash-jget entry "type") "custom")
+                 (equal (agent-dash-jget entry "customType") "agent-dash-import")
+                 (member backend '("claude" "codex")) (stringp id) (not (string-empty-p id))
+                 (stringp digest) (string-match-p "\\`[[:xdigit:]]\\{64\\}\\'" digest))
+        (list :backend backend :id id :sha256 (downcase digest))))))
+
 (defun agent-dash-pi--session-info (file)
   "Return the session plist of Pi session FILE, or nil if it is not one."
-  (let* ((head (agent-dash-file-lines file (* 256 1024)))
+  (let* ((window (* 256 1024))
+         (head (agent-dash-file-lines file window))
          (header (and head (agent-dash-json-read (car head)))))
     (when (equal (agent-dash-jget header "type") "session")
+      ;; A converter can attach a long list of notes to the second record.
+      (while (and (not (cdr head)) (< window (file-attribute-size (file-attributes file))))
+        (setq window (* window 8) head (agent-dash-file-lines file window)))
       (let* ((id (agent-dash-jget header "id"))
              (first (agent-dash-file-find-first file #'agent-dash-pi--user-entry))
              (last (agent-dash-file-find-last file #'agent-dash-pi--user-entry))
              (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
         (list :id id :root (agent-dash-jget header "cwd") :file file
+              :import-source (agent-dash-pi--import-source (cadr head))
               :subagent (and (agent-dash-jget header "parentSession") t)
               :first (and first (agent-dash-pi--entry-text first))
               :last (and last (agent-dash-pi--entry-text last))

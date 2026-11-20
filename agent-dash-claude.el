@@ -418,11 +418,22 @@ Recover the startup record for sessions opened before this feature loaded."
 
 (defun agent-dash-claude--prompt-event (line)
   "Return the parsed event of LINE if it is a human-written prompt."
-  (when (string-search "\"type\":\"user\"" line)
-    (let ((e (agent-dash-json-read line)))
-      (and (agent-dash-claude--prompt-text e)
-           (not (string-prefix-p "[Request interrupted" (agent-dash-claude--prompt-text e)))
-           e))))
+  (when (string-search "\"user\"" line)
+    (when-let* ((e (agent-dash-json-read line))
+                (_ (equal (agent-dash-jget e "type") "user"))
+                (_ (not (agent-dash-jget e "parent_tool_use_id")))
+                (text (agent-dash-claude--prompt-text e)))
+      (unless (string-prefix-p "[Request interrupted" text) e))))
+
+(defun agent-dash-claude--record-cwd (line)
+  "Return the absolute top-level cwd of a main-session record in LINE."
+  (when (string-search "\"cwd\"" line)
+    (let* ((event (agent-dash-json-read line))
+           (cwd (agent-dash-jget event "cwd")))
+      (and (stringp cwd) (file-name-absolute-p cwd) (not (string-prefix-p "~" cwd))
+           (not (agent-dash-jget event "isSidechain"))
+           (not (agent-dash-jget event "parent_tool_use_id"))
+           cwd))))
 
 (defun agent-dash-claude--session-info (file)
   "Return the session plist of transcript FILE."
@@ -431,7 +442,7 @@ Recover the startup record for sessions opened before this feature loaded."
          (last (agent-dash-file-find-last file #'agent-dash-claude--prompt-event))
          (time (agent-dash-iso-seconds (agent-dash-jget last "timestamp"))))
     (list :id id :file file
-          :root (agent-dash-jget (or first last) "cwd")
+          :root (agent-dash-file-find-first file #'agent-dash-claude--record-cwd)
           :first (and first (agent-dash-claude--prompt-text first))
           :last (and last (agent-dash-claude--prompt-text last))
           :time (or time (agent-dash-mtime file)) :exact (and time t)
@@ -467,15 +478,18 @@ Recover the startup record for sessions opened before this feature loaded."
 (cl-defmethod agent-dash-backend-sessions ((_ (eql claude)) root)
   "Claude `agent-dash-backend-sessions' for ROOT."
   (let* ((projects (expand-file-name "projects" agent-dash-claude-config-directory))
-         (dirs (if root
-                   (list (file-name-directory (agent-dash-claude--transcript root "x")))
-                 (and (file-directory-p projects) (directory-files projects t "\\`[^.]")))))
-    (sort (delq nil (mapcan (lambda (dir)
-                              (and (file-directory-p dir)
-                                   (mapcar #'agent-dash-claude--session-info
-                                           (directory-files dir t "\\.jsonl\\'"))))
-                            dirs))
-          (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
+         (want (and root (directory-file-name (expand-file-name root))))
+         (dirs (if want
+                   (list (file-name-directory (agent-dash-claude--transcript want "x")))
+                 (and (file-directory-p projects) (directory-files projects t "\\`[^.]"))))
+         rows)
+    (dolist (dir dirs)
+      (when (file-directory-p dir)
+        (dolist (file (directory-files dir t "\\.jsonl\\'"))
+          (let* ((row (agent-dash-claude--session-info file)) (cwd (plist-get row :root)))
+            (when (or (not want) (and cwd (equal want (directory-file-name cwd))))
+              (push row rows))))))
+    (sort rows (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
 
 (provide 'agent-dash-claude)
 ;;; agent-dash-claude.el ends here
