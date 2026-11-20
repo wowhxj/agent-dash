@@ -90,7 +90,7 @@ Use `M-x customize-group RET agent-dash` for all options.
 | Variable | Purpose |
 |---|---|
 | `agent-dash-dsh-connection` | `auto` (default), `desktop` or `managed`; managed mode starts `dsh web` |
-| `agent-dash-dsh-permission` | New sessions default to `"auto"`; use `"read-only"` or nil to keep the Host default |
+| `agent-dash-dsh-permission` | New sessions default to `"danger-full-access"`. Set to `nil` to use the Host default. |
 | `agent-dash-notify` | Enable or disable background completion reminders |
 
 Completion reminders use Emacs messages while Emacs is focused, and desktop notifications otherwise. Desktop delivery uses your `notify-send` wrapper if configured, or built-in notifications; failures fall back to Emacs messages. Mode-line badges link to pending requests and unread completions. Detached DSH sessions do not send Emacs notifications.

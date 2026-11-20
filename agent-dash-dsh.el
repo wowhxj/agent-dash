@@ -41,7 +41,7 @@ The default filename is a Desktop protocol contract, not a package dependency."
   "Messages of history in the first snapshot of a session."
   :type 'integer)
 
-(defcustom agent-dash-dsh-permission "auto"
+(defcustom agent-dash-dsh-permission "danger-full-access"
   "Permission preset for new DSH sessions; nil keeps the Host default.
 Resuming a session preserves its existing permission preset."
   :type '(choice (const nil) (const "auto") (const "read-only")

@@ -90,7 +90,7 @@
 | 变量 | 用途 |
 |---|---|
 | `agent-dash-dsh-connection` | `auto`（默认）、`desktop` 或 `managed`；managed 模式启动 `dsh web` |
-| `agent-dash-dsh-permission` | 新会话默认 `"auto"`；可设为 `"read-only"`，或 nil 沿用 Host 默认值 |
+| `agent-dash-dsh-permission` | 新会话默认使用完全权限 `"danger-full-access"`。设为 `nil` 可沿用 Host 默认值。 |
 | `agent-dash-notify` | 开关后台任务结束提醒 |
 
 Emacs 获得焦点时通过消息提醒后台任务结束，否则发送桌面通知。桌面通知优先使用已配置的 `notify-send` 封装，否则使用内置通知；失败后回退到 Emacs 消息。mode-line 标记可跳转到待回答请求和未读完成会话。DSH 断开后不会继续发送 Emacs 通知。
