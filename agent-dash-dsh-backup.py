@@ -17,6 +17,8 @@ import tempfile
 import urllib.parse
 import zipfile
 
+from agent_dash_backup_paths import absolute_source, windows_destination
+
 spec = importlib.util.spec_from_file_location('dsh_assets', Path(__file__).with_name('agent-dash-dsh-assets.py'))
 asset = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(asset)
@@ -83,7 +85,7 @@ def files(home, sid):
 
 def validate_row(row):
     h = row['header']
-    check(isinstance(h['id'], str) and SAFE_ID.fullmatch(h['id']) and isinstance(h.get('cwd'), str) and os.path.isabs(h['cwd']), 'DSH 会话头无效')
+    check(isinstance(h['id'], str) and SAFE_ID.fullmatch(h['id']) and absolute_source(h.get('cwd')), 'DSH 会话头无效')
     check(type(row['inherited']) is int and 0 <= row['inherited'] <= len(row['events']), 'DSH 继承序列长度无效')
     events = row['events']
     check(isinstance(events, list) and all(e['seq'] == i for i,e in enumerate(events)), 'DSH 事件序列不连续')
@@ -147,6 +149,15 @@ def unpack(path):
     return rows, blobs, m.get('warnings', WARNINGS)
 
 
+def project_dirs(path):
+    rows, _, _warnings = unpack(path)
+    for row in rows:
+        yield row['header']['cwd']
+        for event in row['events']:
+            if event['type'] == 'working-directory/change':
+                yield event['data']['cwd']
+
+
 def offline(home):
     bridge = under(home, home / 'emacs-dsh-bridge.json')
     if bridge.exists():
@@ -165,6 +176,9 @@ def offline(home):
 def mapped(path, rules):
     source = Path(path)
     for old, new in sorted(rules, key=lambda x: len(x[0]), reverse=True):
+        target = windows_destination(path, old, new)
+        if target is not None:
+            return str(Path(target).resolve())
         if source.is_relative_to(old):
             return str((Path(new) / source.relative_to(old)).resolve())
     return str(source)
@@ -185,7 +199,7 @@ def locked(path, stack=None):
 def restore(a, home):
     rows, blobs, warnings = unpack(a.input)
     for old, new in a.map:
-        check(Path(old).is_absolute() and Path(new).is_absolute(), 'DSH cwd 映射必须使用绝对路径')
+        check(absolute_source(old) and Path(new).is_absolute(), 'DSH cwd 映射必须使用绝对路径')
     registry = under(home, home / REG)
     with tempfile.TemporaryDirectory(prefix='agent-dash-dsh-stage-') as work, ExitStack() as stack:
         stage = Path(work).resolve(); (stage/'storages').mkdir()

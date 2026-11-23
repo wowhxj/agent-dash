@@ -5,6 +5,7 @@ import base64
 from contextlib import contextmanager
 import shutil
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+
+from agent_dash_backup_paths import absolute_source
 
 ROOT = Path(__file__).resolve().parent
 BACKENDS = {'codex': ('python', 'agent-dash-backup.py'), 'pi': ('python', 'agent-dash-pi-backup.py'), 'dsh': ('python', 'agent-dash-dsh-backup.py'), 'hermes': ('python', 'agent-dash-hermes-backup.py')}
@@ -244,7 +247,16 @@ def main():
     a = parser.parse_args()
     if a.command == 'inspect':
         with read_archive(a.input) as packages:
-            return {'backends': list(packages)}
+            directories = set()
+            for backend, path in packages.items():
+                reader = importlib.import_module(Path(BACKENDS[backend][1]).stem)
+                try:
+                    for value in reader.project_dirs(path):
+                        if absolute_source(value):
+                            directories.add(value)
+                except (ValueError, KeyError, TypeError, AttributeError, zipfile.BadZipFile) as error:
+                    raise ValueError(f'{backend} 子包的目录元数据无效') from error
+            return {'backends': list(packages), 'project_dirs': sorted(directories)}
     paths = homes(a.home)
     return export(a, paths) if a.command == 'export' else execute(a, paths)
 

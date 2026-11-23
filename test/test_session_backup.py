@@ -71,13 +71,35 @@ class SessionBackupTest(unittest.TestCase):
         homes = ['--home', 'codex', self.dst, '--home', 'pi', pi_dst]
         preview = self.cli('preview', *homes, '--input', self.archive)
         self.assertEqual({(s['backend'], s['id'], s['action']) for s in preview['sessions']}, {('codex', SID, 'create'), ('pi', SID, 'create')})
-        self.assertEqual(set(self.cli('inspect', '--input', self.archive)['backends']), {'codex', 'pi'})
+        inspection = self.cli('inspect', '--input', self.archive)
+        self.assertEqual(set(inspection['backends']), {'codex', 'pi'})
+        self.assertEqual(inspection['project_dirs'], ['/old'])
         with zipfile.ZipFile(self.archive) as z:
             raw_pi = self.root / 'pi-native.zip'
             raw_pi.write_bytes(z.read('packages/pi.zip'))
-        self.assertEqual(self.cli('inspect', '--input', raw_pi)['backends'], ['pi'])
+        inspection = self.cli('inspect', '--input', raw_pi)
+        self.assertEqual(inspection['backends'], ['pi'])
+        self.assertEqual(inspection['project_dirs'], ['/old'])
         self.cli('import', *homes, '--input', self.archive, '--preview-token', preview['preview_token'])
         self.assertEqual({s['action'] for s in self.cli('preview', *homes, '--input', self.archive)['sessions']}, {'skip'})
+
+    def test_map_windows_project_to_existing_local_directory(self):
+        old = r'C:\work\project'
+        path = self.src / REL
+        path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': SID, 'cwd': old}}) + '\n')
+        with sqlite3.connect(self.src / 'state_5.sqlite') as db:
+            db.execute('UPDATE threads SET cwd=? WHERE id=?', (old, SID))
+        self.export()
+        self.assertEqual(self.cli('inspect', '--input', self.archive)['project_dirs'], [old])
+        project = self.root / 'project'
+        project.mkdir()
+        args = ['--home', 'codex', self.dst, '--input', self.archive, '--map', old, project]
+        preview = self.cli('preview', *args)
+        self.cli('import', *args, '--preview-token', preview['preview_token'])
+        record = json.loads((self.dst / REL).read_text())
+        self.assertEqual(record['payload']['cwd'], str(project))
+        with sqlite3.connect(self.dst / 'state_5.sqlite') as db:
+            self.assertEqual(db.execute('SELECT cwd FROM threads').fetchone(), (str(project),))
 
     def test_hermes_native_and_mixed_routing(self):
         source, target = self.root / 'hermes-src', self.root / 'hermes-dst'
@@ -96,7 +118,9 @@ class SessionBackupTest(unittest.TestCase):
         native = self.root / 'hermes.zip'
         with zipfile.ZipFile(self.archive) as z:
             native.write_bytes(z.read('packages/hermes.zip'))
-        self.assertEqual(self.cli('inspect', '--input', native)['backends'], ['hermes'])
+        inspection = self.cli('inspect', '--input', native)
+        self.assertEqual(inspection['backends'], ['hermes'])
+        self.assertEqual(inspection['project_dirs'], ['/old'])
         homes = ['--home', 'codex', self.dst, '--home', 'hermes', target]
         preview = self.cli('preview', *homes, '--input', self.archive, '--active-session', 'hermes:' + SID)
         self.assertEqual({(s['backend'], s['action']) for s in preview['sessions']}, {('codex', 'create'), ('hermes', 'busy')})

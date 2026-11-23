@@ -1438,15 +1438,29 @@ Candidates keep the list order and show the table header as their group."
                       (agent-dash-data session :sid)) ids)))
     (sort (delete-dups ids) #'string<)))
 
-(defun agent-dash-hub--backup-maps ()
-  "Read optional source to destination project directory mappings."
-  (let (args)
-    (while (yes-or-no-p "添加项目目录映射? ")
-      (let ((old (agent-dash-hub--backup-local (read-directory-name "备份中的原目录：")))
-            (new (agent-dash-hub--backup-local (read-directory-name "本机目标目录：" nil nil t))))
-        (unless (file-directory-p new) (user-error "映射目标目录不存在：%s" new))
-        (setq args (append args (list "--map" (directory-file-name old)
-                                      (directory-file-name new))))))
+(defun agent-dash-hub--backup-maps (project-dirs)
+  "Resolve missing PROJECT-DIRS and return the backup CLI mapping arguments."
+  (let ((dirs (sort (delete-dups (mapcar #'directory-file-name project-dirs)) #'string<))
+        mappings args)
+    (dolist (old dirs)
+      (let ((local (and (file-name-absolute-p old) (not (file-remote-p old)))))
+        (unless (and local (file-directory-p old))
+          (if (and local (not (file-exists-p old))
+                   (= ?c (read-char-choice
+                          (format "项目目录 %s 缺失：[c] 按原路径新建，[m] 映射到本机目录 " old)
+                          '(?c ?m))))
+              (make-directory old t)
+            (let ((new (agent-dash-hub--backup-local
+                        (read-directory-name (format "%s 映射到：" old) nil nil t))))
+              (unless (file-directory-p new) (user-error "目标目录不存在：%s" new))
+              (push (cons old (directory-file-name new)) mappings))))))
+    ;; A more specific project can retain its path under a remapped parent.
+    (dolist (dir (reverse dirs))
+      (let ((mapping (assoc dir mappings)))
+        (when (or mapping (seq-some (lambda (pair)
+                                      (string-prefix-p (file-name-as-directory (car pair)) dir))
+                                    mappings))
+          (setq args (append args (list "--map" dir (or (cdr mapping) dir)))))))
     args))
 
 (defun agent-dash-hub-backup-import ()
@@ -1463,16 +1477,17 @@ Candidates keep the list order and show the table header as their group."
                     (seq-every-p (lambda (b) (member b '("codex" "pi" "dsh" "hermes"))) backends))
                (when (buffer-live-p hub)
                  (with-current-buffer hub
-                   (agent-dash-hub--backup-preview file (mapcar #'intern backends))))
+                   (agent-dash-hub--backup-preview file (mapcar #'intern backends)
+                                                    (agent-dash-jget result "project_dirs"))))
              (message "读取备份失败：后端列表无效"))))))))
 
-(defun agent-dash-hub--backup-preview (file backends)
-  "Preview FILE for BACKENDS and confirm before importing."
+(defun agent-dash-hub--backup-preview (file backends project-dirs)
+  "Resolve PROJECT-DIRS and preview FILE for BACKENDS before importing."
   (when (and (memq 'dsh backends)
              (not (yes-or-no-p "DSH 恢复期间必须停止目标 Host，确认已停止且不会重启? ")))
     (user-error "已取消 DSH 备份导入"))
   (let* ((homes (agent-dash-hub--backup-homes backends))
-         (maps (agent-dash-hub--backup-maps))
+         (maps (agent-dash-hub--backup-maps project-dirs))
          (active (agent-dash-hub--backup-active-ids))
          (active-args (cl-mapcan (lambda (id) (list "--active-session" id)) active))
          (hub (current-buffer)))
@@ -1515,7 +1530,10 @@ Candidates keep the list order and show the table header as their group."
                                               ("busy" "使用中跳过") (_ "相同跳过")) backend id path))))
                    (special-mode)))
                (display-buffer report)
-               (when (yes-or-no-p "覆盖前将保存回滚快照；确认按预览导入? ")
+               (when (or (not (seq-some (lambda (session)
+                                           (equal (agent-dash-jget session "action") "overwrite"))
+                                         sessions))
+                          (yes-or-no-p "覆盖前将保存回滚快照；确认按预览导入? "))
                  (unless (equal active (agent-dash-hub--backup-active-ids))
                    (error "活动会话已改变，请重新预览"))
                  (dolist (session sessions)

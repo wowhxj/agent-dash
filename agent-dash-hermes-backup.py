@@ -16,6 +16,8 @@ import time
 import unicodedata
 import zipfile
 
+from agent_dash_backup_paths import absolute_source, windows_destination
+
 LIMIT = 256 * 1024 * 1024
 TABLES = ('sessions', 'messages', 'session_model_usage', 'system_prompts')
 
@@ -282,19 +284,39 @@ def mapped(path, mappings):
     for old, new in sorted(mappings, key=lambda x: len(x[0].rstrip('/')), reverse=True):
         if path == old:
             return new
+        target = windows_destination(path, old, new)
+        if target is not None:
+            return target
         if path.startswith(old.rstrip('/') + '/'):
             return new.rstrip('/') + path[len(old.rstrip('/')):]
     return path
 
 
+def project_dirs(path):
+    directories = set()
+
+    def collect_path(value):
+        if isinstance(value, str):
+            directories.add(value)
+        return value
+
+    update_paths(load_archive(path), collect_path, include_receipts=True)
+    return directories
+
+
 def normalize(data, maps):
-    if len({x[0] for x in maps}) != len(maps) or any(not os.path.isabs(a) or not os.path.isabs(b) for a, b in maps):
+    if len({x[0] for x in maps}) != len(maps) or any(not absolute_source(a) or not os.path.isabs(b) for a, b in maps):
         raise ValueError('无效目录映射')
     data = json.loads(encode(data))
+    update_paths(data, lambda path: mapped(path, maps), include_receipts=bool(maps))
+    return data
+
+
+def update_paths(data, transform, include_receipts):
     for row in data['sessions']:
         for key in ('cwd', 'git_repo_root'):
             if key in row:
-                row[key] = mapped(row[key], maps)
+                row[key] = transform(row[key])
         config = row.get('model_config')
         if isinstance(config, str):
             try:
@@ -302,33 +324,33 @@ def normalize(data, maps):
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, dict) and isinstance(parsed.get('cwd'), str):
-                new = mapped(parsed['cwd'], maps)
+                new = transform(parsed['cwd'])
                 if new != parsed['cwd']:
                     parsed['cwd'] = new
                     row['model_config'] = encode(parsed).decode()
     for sid, raw in data['receipts'].items():
-        if raw is None or not maps:
+        if raw is None or not include_receipts:
             continue
         saved = json.loads(raw)
         policy = saved['policy']
         changed = False
-        for key in ('cwd',):
-            if key in policy and mapped(policy[key], maps) != policy[key]:
-                policy[key] = mapped(policy[key], maps)
+        if 'cwd' in policy:
+            new = transform(policy['cwd'])
+            if new != policy['cwd']:
+                policy['cwd'] = new
                 changed = True
         for key, fields in (('terminal_json', ('TERMINAL_CWD',)), ('request_json', ('cwd', 'row_cwd'))):
             if key not in policy:
                 continue
             nested = json.loads(policy[key])
-            if isinstance(nested, dict) and any(f in nested and mapped(nested[f], maps) != nested[f] for f in fields):
-                for f in fields:
-                    if f in nested:
-                        nested[f] = mapped(nested[f], maps)
-                policy[key] = encode(nested).decode()
-                changed = True
+            if isinstance(nested, dict):
+                updates = {f: transform(nested[f]) for f in fields if f in nested}
+                if any(nested[f] != value for f, value in updates.items()):
+                    nested.update(updates)
+                    policy[key] = encode(nested).decode()
+                    changed = True
         if changed:
             data['receipts'][sid] = encode(saved).decode()
-    return data
 
 
 def comparable(data, sid):

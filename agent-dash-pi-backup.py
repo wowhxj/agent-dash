@@ -13,6 +13,8 @@ import sys
 import tempfile
 import zipfile
 
+from agent_dash_backup_paths import absolute_source, windows_destination
+
 LIMIT = 256 * 1024 * 1024
 TOTAL = 1024 * 1024 * 1024
 
@@ -184,10 +186,27 @@ def validate_directory(infos):
     return names
 
 
+def project_dirs(path):
+    with zipfile.ZipFile(path) as z:
+        validate_directory(z.infolist())
+        manifest = json.loads(z.read('manifest.json'))
+        if manifest.get('format') != 'agent-dash-pi' or manifest.get('version') != 1:
+            raise ValueError('不支持的归档格式')
+        for index, item in enumerate(manifest['sessions']):
+            member = 'sessions/' + str(index) + '.jsonl'
+            if item['member'] != member:
+                raise ValueError('无效归档成员')
+            with z.open(member) as source:
+                first = header(source.readline(LIMIT + 1))
+            if first['id'] != item['id']:
+                raise ValueError('会话身份不匹配')
+            yield first['cwd']
+
+
 def archive(a, stage):
     home = Path(a.home).expanduser().resolve()
     mappings = a.map or []
-    if len({x[0] for x in mappings}) != len(mappings) or any(not os.path.isabs(x) or not os.path.isabs(y) for x, y in mappings):
+    if len({x[0] for x in mappings}) != len(mappings) or any(not absolute_source(x) or not os.path.isabs(y) for x, y in mappings):
         raise ValueError('无效目录映射')
     with zipfile.ZipFile(a.input) as z:
         names = validate_directory(z.infolist())
@@ -275,6 +294,9 @@ def mapped_cwd(cwd, mappings):
     for old, new in sorted(mappings, key=lambda pair: len(pair[0].rstrip('/')), reverse=True):
         if cwd == old:
             return new
+        target = windows_destination(cwd, old, new)
+        if target is not None:
+            return target
         if cwd.startswith(old.rstrip('/') + '/'):
             return new.rstrip('/') + cwd[len(old.rstrip('/')):]
     return cwd

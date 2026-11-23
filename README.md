@@ -19,7 +19,7 @@ With a `use-package` version that supports `:vc`:
   (setq agent-dash-summary-enable nil))
 ```
 
-Alternatively, add a checkout to `load-path` and `(require 'agent-dash)`. Keep the repository’s `agent-dash-*.mjs` and `agent-dash-*.py` helpers alongside the Elisp files for Pi commands, session conversion and portable backups.
+Alternatively, add a checkout to `load-path` and `(require 'agent-dash)`. Keep the repository root’s `agent-dash-*.mjs` and `*.py` helpers alongside the Elisp files for Pi commands, session conversion and portable backups.
 
 **Background summaries are enabled by default.** The example above opts out. If enabled, they send saved user/assistant dialogue to your configured gptel model and may incur charges; see [Summaries and privacy](#summaries-and-privacy).
 
@@ -96,9 +96,9 @@ DSH export also requires `python3` to build the ZIP. Enable **DeepSeek chat impo
 
 ## Back up and restore sessions across computers
 
-In the Hub on the old computer, press `M` to select all sessions matching the current filters, including sessions inside folded groups. Press `B s` to export the selected Codex, Pi, DSH and Hermes sessions to one ZIP. Use `m` to select individual sessions. On the new computer, press `B i` and choose the ZIP. If a project has moved, enter the old and new directories when importing.
+In the Hub on the old computer, press `M` to select all sessions matching the current filters, including sessions inside folded groups. Press `B s` to export the selected Codex, Pi, DSH and Hermes sessions to one ZIP. Use `m` to select individual sessions. On the new computer, press `B i` and choose the ZIP. Existing project directories are used automatically. For each missing directory, press `c` to create it at its original path or `m` to choose an existing local directory.
 
-The preview identifies each session by backend and session ID. Sessions in different backends may share the same ID. Confirmation replaces only a matching session in the same backend. Identical contents are skipped. The report shows the results and where to find rollback files. Use `B i` with a reported rollback archive to recover an overwritten session. Move project code, login credentials and external files merely referenced by history separately.
+The preview identifies each session by backend and session ID. Sessions in different backends may share the same ID. New sessions are imported automatically and identical sessions are skipped. The Hub asks for confirmation before replacing an existing session in the same backend. The report shows the results and where to find rollback files. Use `B i` with a reported rollback archive to recover an overwritten session. Move project code, login credentials and external files merely referenced by history separately.
 
 **Pi.** Parent sessions needed by a branch are included in the package. Import updates the project directory and parent-session paths in the native headers. Messages, tool records and branches remain available under their original session IDs.
 

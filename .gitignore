@@ -1,4 +1,5 @@
 *.elc
+__pycache__/
 *~
 HANDOFF.md
 *-autoloads.el

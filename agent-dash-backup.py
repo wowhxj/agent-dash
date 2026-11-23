@@ -14,6 +14,8 @@ import sys
 import tempfile
 import zipfile
 
+from agent_dash_backup_paths import absolute_source, codex_destination
+
 LIMIT = 8 * 1024 * 1024 * 1024
 TOTAL = 64 * 1024 * 1024 * 1024
 LINE_LIMIT = 64 * 1024 * 1024
@@ -274,17 +276,39 @@ def archive(path, tmp):
         return result
 
 
-def mapped_rollout(path, sid, mappings, output=None):
+def project_dirs(path):
+    with tempfile.TemporaryDirectory() as tmp:
+        for item, rollout in archive(path, tmp):
+            meta = item['metadata']
+            yield meta['thread'].get('cwd')
+            for row in meta['references'].get('project_roots', []):
+                yield row.get('path')
+            directories = set()
+            mapped_rollout(rollout, item['id'], [], directories=directories)
+            yield from directories
+
+
+def mapped_rollout(path, sid, mappings, output=None, directories=None):
     def update(settings):
+        if directories is not None:
+            if isinstance(settings.get('cwd'), str):
+                directories.add(settings['cwd'])
+            roots = settings.get('runtime_workspace_roots')
+            if isinstance(roots, list):
+                directories.update(root for root in roots if isinstance(root, str))
         changed = False
-        for old, new in mappings:
-            if settings.get('cwd') == old:
-                settings['cwd'] = new
+        if mappings:
+            cwd = settings.get('cwd')
+            destination = codex_destination(cwd, mappings)
+            if destination != cwd:
+                settings['cwd'] = destination
                 changed = True
             roots = settings.get('runtime_workspace_roots')
-            if isinstance(roots, list) and old in roots:
-                settings['runtime_workspace_roots'] = [new if root == old else root for root in roots]
-                changed = True
+            if isinstance(roots, list):
+                destinations = [codex_destination(root, mappings) for root in roots]
+                if destinations != roots:
+                    settings['runtime_workspace_roots'] = destinations
+                    changed = True
         return changed
 
     h = hashlib.sha256()
@@ -296,7 +320,7 @@ def mapped_rollout(path, sid, mappings, output=None):
                 break
             if len(line) > LINE_LIMIT:
                 raise ValueError('rollout 单行超过大小限制')
-            if index == 0 or mappings:
+            if index == 0 or mappings or directories is not None:
                 event = json.loads(line)
                 if not isinstance(event, dict):
                     raise ValueError('rollout 事件无效')
@@ -323,7 +347,7 @@ def plan(a, con, entries):
     home = Path(a.home).expanduser().resolve()
     active = sorted(set(a.active_id or []))
     mappings = a.map or []
-    if any(not ID.fullmatch(x) for x in active) or len({x[0] for x in mappings}) != len(mappings) or any(not os.path.isabs(old) or not os.path.isabs(new) for old, new in mappings):
+    if any(not ID.fullmatch(x) for x in active) or len({x[0] for x in mappings}) != len(mappings) or any(not absolute_source(old) or not os.path.isabs(new) for old, new in mappings):
         raise ValueError('无效 active-id 或重复映射')
     actions = []
     targets = set()
@@ -345,15 +369,11 @@ def plan(a, con, entries):
             if any(set(row) - cols for row in rows):
                 raise ValueError('目标数据库版本缺少字段: ' + table)
         thread['rollout_path'] = str(target)
-        for old, new in mappings:
-            if thread.get('cwd') == old:
-                thread['cwd'] = new
-                break
+        if 'cwd' in thread:
+            thread['cwd'] = codex_destination(thread['cwd'], mappings)
         for row in meta['references'].get('project_roots', []):
-            for old_root, new_root in mappings:
-                if row.get('path') == old_root:
-                    row['path'] = new_root
-                    break
+            if 'path' in row:
+                row['path'] = codex_destination(row['path'], mappings)
         for table in ('projects', 'thread_sections'):
             refs = meta['references'].get(table, [])
             if refs:
