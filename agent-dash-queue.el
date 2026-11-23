@@ -52,6 +52,11 @@
   (cl-remove-if-not (lambda (e) (and (eq (plist-get e :status) 'pending)
                                      (or (not kind) (eq kind (plist-get e :kind)))))
                     (agent-dash-queue-entries session)))
+(defun agent-dash-queue--sent-dsh-steer-p (session entry)
+  "Return non-nil for a retained DSH steering receipt in SESSION."
+  (and (eq (agent-dash-session-backend session) 'dsh)
+       (eq (plist-get entry :kind) 'steer)
+       (eq (plist-get entry :status) 'sent)))
 (defun agent-dash-queue-managed-p (session)
   "Whether SESSION has pending local work or an outstanding delivery."
   (or (agent-dash-queue-pending session) (agent-dash-data session :queue-inflight)))
@@ -91,9 +96,19 @@
                             agent-dash-prompt-filter-functions text)))
       (unless (stringp wire) (user-error "A prompt filter did not return text"))
       (list :text text :wire-text wire :images (copy-tree images)))))
+(defun agent-dash-queue--dsh-steer-ready-p (session)
+  "Whether SESSION can hand a new steer to its active DSH run now."
+  (and (eq (agent-dash-session-backend session) 'dsh)
+       (eq (agent-dash-session-state session) 'running)
+       (buffer-live-p (agent-dash-session-buffer session))
+       (not (agent-dash-data session :queue-paused))
+       (not (agent-dash-data session :queue-detached))
+       (not (agent-dash-session-requests session))))
+
 (defun agent-dash-queue-add (session text images &optional kind)
   "Queue one atomic TEXT plus IMAGES message for SESSION with KIND.
-Follow-ups dispatch only when idle.  Steering entries require explicit Apply."
+Follow-ups dispatch when idle.  An active, unpaused DSH run takes a steer
+immediately.  Other steering entries wait for explicit Apply."
   (setq kind (or kind 'follow-up))
   (unless (memq kind '(follow-up steer)) (user-error "Invalid queue kind"))
   (when (and (eq kind 'steer) (not (agent-dash-capability session :steer)))
@@ -115,8 +130,10 @@ Follow-ups dispatch only when idle.  Steering entries require explicit Apply."
               (eq (agent-dash-session-state session) 'dead))
       (agent-dash-set-data session :queue-paused t)
       (agent-dash-set-data session :queue-detached t))
-    (agent-dash-queue--touch session)
-    (agent-dash-queue--schedule session)
+    (if (and (eq kind 'steer) (agent-dash-queue--dsh-steer-ready-p session))
+        (agent-dash-queue-apply session (plist-get entry :id))
+      (agent-dash-queue--touch session)
+      (agent-dash-queue--schedule session))
     entry))
 (defun agent-dash-queue-update (session id text images)
   "Replace unsent entry ID with atomic TEXT and IMAGES in SESSION."
@@ -134,14 +151,17 @@ Follow-ups dispatch only when idle.  Steering entries require explicit Apply."
   (agent-dash-queue--touch session)
   (agent-dash-queue--schedule session))
 (defun agent-dash-queue-convert (session id kind)
-  "Stage SESSION's entry ID as KIND without sending it."
+  "Convert SESSION's entry ID to KIND.
+Selecting steer for an active, unpaused DSH session applies it immediately."
   (unless (memq kind '(follow-up steer)) (user-error "Invalid queue kind"))
   (when (and (eq kind 'steer) (not (agent-dash-capability session :steer)))
     (user-error "This backend cannot steer"))
   (plist-put (agent-dash-queue--editable session id) :kind kind)
-  ;; A staged conversion must not dispatch merely because a timer is pending.
-  (agent-dash-set-data session :queue-paused t)
-  (agent-dash-queue--touch session))
+  (if (and (eq kind 'steer) (agent-dash-queue--dsh-steer-ready-p session))
+      (agent-dash-queue-apply session id)
+    ;; A staged conversion must not dispatch merely because a timer is pending.
+    (agent-dash-set-data session :queue-paused t)
+    (agent-dash-queue--touch session)))
 (defun agent-dash-queue-move (session id delta)
   "Move SESSION's pending ID by DELTA, crossing the Steer/Follow boundary.
 Crossing stages a kind conversion and pauses delivery; it never sends."
@@ -227,9 +247,29 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
                  (not (agent-dash-data session :queue-detached))
                  (eq (agent-dash-session-state session) 'running))
       (user-error "No connected running task to steer"))
-    (when (or (agent-dash-data session :queue-inflight) (agent-dash-session-requests session))
-      (user-error "Wait for the outstanding delivery or dialog first"))
-    (agent-dash-queue--dispatch session entry 'steer)))
+    (when (agent-dash-session-requests session) (user-error "Answer the pending dialog first"))
+    (if (eq (agent-dash-session-backend session) 'dsh)
+        ;; DSH acknowledges the steer RPC independently of the turn it steers.
+        ;; Leave the follow-up that owns this turn in the normal inflight slot.
+        (let ((sending (agent-dash-data session :queue-sending)))
+          (plist-put entry :status 'sending)
+          (agent-dash-queue--touch session)
+          (condition-case nil
+              (progn
+                (agent-dash-set-data session :queue-sending id)
+                (unwind-protect
+                    (agent-dash-backend-send 'dsh session (plist-get entry :wire-text)
+                                             (plist-get entry :images) 'steer)
+                  (agent-dash-set-data session :queue-sending sending))
+                (plist-put entry :accepted t)
+                (plist-put entry :ended t)
+                (agent-dash-queue--finish session entry))
+            (error (agent-dash-queue--fail session entry 'unknown))
+            (quit (agent-dash-queue--fail session entry 'unknown)
+                  (signal 'quit nil))))
+      (when (agent-dash-data session :queue-inflight)
+        (user-error "Wait for the outstanding delivery first"))
+      (agent-dash-queue--dispatch session entry 'steer))))
 (defun agent-dash-queue--dispatch (session entry mode)
   "Cross the one-way delivery boundary for ENTRY of SESSION using MODE."
   (let* ((id (plist-get entry :id))
@@ -259,7 +299,8 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
 (defun agent-dash-queue--fail (session entry status)
   "Freeze ENTRY as STATUS and pause SESSION without retrying anything."
   (plist-put entry :status status)
-  (agent-dash-set-data session :queue-inflight nil)
+  (when (equal (plist-get entry :id) (agent-dash-data session :queue-inflight))
+    (agent-dash-set-data session :queue-inflight nil))
   (agent-dash-set-data session :queue-paused t)
   (agent-dash-queue--touch session))
 (defun agent-dash-queue--finish (session entry)
@@ -269,7 +310,8 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
     (plist-put entry :image-count (length (plist-get entry :images)))
     ;; Successful deliveries keep lightweight read-only receipts, not blobs.
     (plist-put entry :images nil)
-    (agent-dash-set-data session :queue-inflight nil)
+    (when (equal (plist-get entry :id) (agent-dash-data session :queue-inflight))
+      (agent-dash-set-data session :queue-inflight nil))
     (agent-dash-queue--touch session)
     (agent-dash-queue--schedule session)))
 (defun agent-dash-queue--event (session event)
@@ -391,7 +433,9 @@ Do not close anything if killing is declined, and never delete the last window."
   (interactive)
   (let* ((session agent-dash-queue--owner)
          (id (tabulated-list-get-id))
-         (entries (cl-remove-if (lambda (e) (eq (plist-get e :status) 'sent))
+         (entries (cl-remove-if (lambda (e)
+                                  (and (eq (plist-get e :status) 'sent)
+                                       (not (agent-dash-queue--sent-dsh-steer-p session e))))
                                 (agent-dash-queue-entries session)))
          (native (agent-dash-session-queue session))
          (inhibit-read-only t))
@@ -481,7 +525,7 @@ Do not close anything if killing is declined, and never delete the last window."
             "e / a       Edit / add a text-and-image message\n"
             "RET         View a message\n"
             "d           Delete an unsent message\n"
-            "f / s       Stage follow / steer conversion\n"
+            "f / s       Convert to follow / steer (active unpaused DSH applies steer now)\n"
             "x           Apply the selected steering message\n"
             "SPC         Toggle automatic follow-up delivery\n"
             "P / r       Pause / continue follow-ups\n"
@@ -510,7 +554,7 @@ Do not close anything if killing is declined, and never delete the last window."
     ("D" "清理失败回执" agent-dash-queue-forget :transient t)]
    ["类型与发送"
     ("f" "暂存为 Follow" agent-dash-queue-follow :transient t)
-    ("s" "暂存为 Steer" agent-dash-queue-steer :transient t)
+    ("s" "转为 Steer（DSH 运行中且未暂停时立即发送）" agent-dash-queue-steer :transient t)
     ("x" "应用选中 Steer" agent-dash-queue-send-steer)
     ("SPC" "切换自动发送" agent-dash-queue-toggle-pause :transient t)
     ("P" "暂停 Follow" agent-dash-queue-stop :transient t)
@@ -541,7 +585,7 @@ Do not close anything if killing is declined, and never delete the last window."
   (interactive)
   (agent-dash-queue-convert agent-dash-queue--owner (agent-dash-queue--selected) 'follow-up))
 (defun agent-dash-queue-steer ()
-  "Stage the selected entry as steering; do not send it."
+  "Select steering, applying it immediately to an active, unpaused DSH run."
   (interactive)
   (agent-dash-queue-convert agent-dash-queue--owner (agent-dash-queue--selected) 'steer))
 (defun agent-dash-queue-up ()

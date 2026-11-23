@@ -38,7 +38,7 @@ Chats run in the background and can survive closing their buffer or Emacs. `C-c 
 | `TAB` | Complete `/` commands and `@` session references in the composer; toggle items elsewhere |
 | `M-p` / `M-n` | Previous / next input |
 | `C-c C-k` | Interrupt the current run |
-| `C-c C-s` | Stage a steering message; apply it from the queue |
+| `C-c C-s` | Steer the running DSH session; stage steering for other supported backends |
 | `C-c C-i` | Focus the composer |
 | `C-c C-f` / `C-c C-v` | Attach image file / clipboard image |
 | `C-c C-d` | Remove draft images |
@@ -49,7 +49,7 @@ Chats run in the background and can survive closing their buffer or Emacs. `C-c 
 
 Use `M-x agent-dash-select-model` to change models where supported. `@` references insert saved user/assistant dialogue into the outgoing message. `/` completion shows available backend commands; Pi also supports native login, logout and reload without sending those operations to the model.
 
-During a run, normal sends enter the local follow-up queue. Queued drafts can be reviewed, reordered, edited or deleted before delivery; delivered messages cannot be withdrawn. Steering must be applied explicitly from the queue and falls back to follow-up when unsupported. **Queues are not persisted across Emacs restarts.**
+During a run, normal sends enter the local follow-up queue. Queued drafts can be reviewed, reordered, edited or deleted before delivery; delivered messages cannot be withdrawn. During a DSH run, `C-c C-s` submits a steer directly. Pressing `s` on a queued item also submits it as steering. Pausing the queue stages steering locally. To deliver a staged steer manually, select it during a run and press `x`. **Queues are not persisted across Emacs restarts.**
 
 Images support PNG, JPEG, GIF and WebP. File attachment works without a clipboard tool. Clipboard paste needs `pngpaste` on macOS, or `wl-paste` / `xclip` on Linux. A backend that does not support images rejects the attachment rather than silently dropping it.
 

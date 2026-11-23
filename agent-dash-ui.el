@@ -786,7 +786,7 @@ Return the session."
     (agent-dash--submit nil)))
 
 (defun agent-dash-steer ()
-  "Stage the draft as steering; apply it explicitly in `agent-dash-queue'."
+  "Steer the active DSH run, or stage the draft in `agent-dash-queue'."
   (interactive)
   (unless (agent-dash-capability agent-dash--session :steer)
     (user-error "This backend cannot steer"))
