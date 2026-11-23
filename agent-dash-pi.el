@@ -678,9 +678,17 @@ Never kill a busy/unsaved session or launch before the old holder has exited."
 
 (defun agent-dash-pi--file (id)
   "Return the saved session file of Pi session ID, or nil."
-  (seq-find (lambda (file)
-              (equal id (plist-get (agent-dash-pi--session-info file) :id)))
-            (agent-dash-pi--files id)))
+  (let* ((named (agent-dash-pi--files id))
+         (matches (lambda (file)
+                    (condition-case nil
+                        (let* ((first (agent-dash-file-find-first file #'identity))
+                               (head (agent-dash-json-read first)))
+                          (and (equal "session" (agent-dash-jget head "type"))
+                               (equal id (agent-dash-jget head "id"))))
+                      (error nil)))))
+    (or (seq-find matches named)
+        ;; Older and nested sessions can have a filename unrelated to their ID.
+        (seq-find matches (seq-difference (agent-dash-pi--files) named)))))
 
 (defun agent-dash-pi--files (&optional id)
   "Return saved Pi JSONL files in every layout, optionally matching ID."

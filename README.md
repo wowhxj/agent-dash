@@ -19,7 +19,7 @@ With a `use-package` version that supports `:vc`:
   (setq agent-dash-summary-enable nil))
 ```
 
-Alternatively, add a checkout to `load-path` and `(require 'agent-dash)`. Keep the repository’s `agent-dash-*.mjs` helpers alongside the Elisp files for Pi's native commands and local session conversion.
+Alternatively, add a checkout to `load-path` and `(require 'agent-dash)`. Keep the repository’s `agent-dash-*.mjs` and `agent-dash-*.py` helpers alongside the Elisp files for Pi commands, session conversion and portable backups.
 
 **Background summaries are enabled by default.** The example above opts out. If enabled, they send saved user/assistant dialogue to your configured gptel model and may incur charges; see [Summaries and privacy](#summaries-and-privacy).
 
@@ -93,6 +93,24 @@ node agent-dash-dsh-export.mjs codex "$ROLLOUT" "$SESSION_ID" "$PROJECT" "$PI_SE
 ```
 
 DSH export also requires `python3` to build the ZIP. Enable **DeepSeek chat import** under Plugins → More → Experimental plugins in DSH. Press `v d` in the Hub to import into the DSH workspace for the source project. After verifying the imported history, the report shows the native DSH session ID. Claude sources are retired after verification. Codex sources are retained. For transfer to another machine, press `v e` and upload the resulting ZIP in the destination DSH. Historical tool calls and results appear as attributed text; the original archive keeps the native records. Uploading the same ZIP manually twice creates two sessions.
+
+## Back up and restore sessions across computers
+
+In the Hub on the old computer, press `M` to select all sessions matching the current filters, including sessions inside folded groups. Press `B s` to export the selected Codex, Pi, DSH and Hermes sessions to one ZIP. Use `m` to select individual sessions. On the new computer, press `B i` and choose the ZIP. If a project has moved, enter the old and new directories when importing.
+
+The preview identifies each session by backend and session ID. Sessions in different backends may share the same ID. Confirmation replaces only a matching session in the same backend. Identical contents are skipped. The report shows the results and where to find rollback files. Use `B i` with a reported rollback archive to recover an overwritten session. Move project code, login credentials and external files merely referenced by history separately.
+
+**Pi.** Parent sessions needed by a branch are included in the package. Import updates the project directory and parent-session paths in the native headers. Messages, tool records and branches remain available under their original session IDs.
+
+**DSH.** Start DSH once on the new machine to initialize the standard data root (`DSH_HOME`, normally `~/.dsh`). For a custom location, set `agent-dash-hub-dsh-backup-directory` in Emacs. Quit DSH Desktop or `dsh web` on the destination before importing from Emacs. After import, restart DSH and press `g` in the Hub. The archive includes native session events and referenced attachments. Configure the required plugins and models separately. Project files, background jobs and reminders are outside the session backup.
+
+**Hermes.** Use the Hermes data directory configured by `agent-dash-hermes-directory` (defaults to `HERMES_HOME` or `~/.hermes`). Start Hermes once on the new machine to initialize its native database. The backup preserves session IDs, messages, system prompts and model usage. It includes related branches, creation receipts needed for native resume, and any per-session JSONL recovery files. Close clients using the destination session before overwriting it. The two databases need compatible table layouts.
+
+If the selection includes Claude sessions, the Hub shows how many and lets you cancel or proceed with the supported sessions.
+
+**Codex.** Initialize the native index on the destination machine by starting Codex once. Close other Codex processes using that data directory before confirming the import. Existing Codex-only ZIPs are still accepted by `B i`.
+
+To recover readable sessions that were overwritten, import the rollback ZIP shown in the report with `B i`. The snapshot directory also holds a full copy of the destination SQLite index and should be kept private. An interrupted import with an unfinished snapshot blocks subsequent imports. Close Codex and compare the snapshot with current data before recovery to preserve later sessions. Tested with Codex CLI 0.170.0 and `state_5.sqlite`. Compressed histories require `zstd`. Open-file checks require `lsof`.
 
 ## Summaries and privacy
 

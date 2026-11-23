@@ -35,7 +35,7 @@
           (agent-dash-history-test--pi-file base "flat.jsonl" "flat" "/tmp/project")
           (agent-dash-history-test--pi-file base "--old--/date_legacy.jsonl"
                                             "legacy" "/tmp/project")
-          (agent-dash-history-test--pi-file base "--old--/parent/child/run-0/date_child.jsonl"
+          (agent-dash-history-test--pi-file base "--old--/parent/child/run-0/session.jsonl"
                                             "child" "/tmp/other" "parent")
           (with-temp-file (expand-file-name "broken.jsonl" base) (insert "not JSON\n"))
           (with-temp-file (expand-file-name "events.jsonl" base) (insert "{\"type\":\"event\"}\n"))

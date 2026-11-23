@@ -18,6 +18,7 @@ test-node:
 	node --test test/*.test.mjs
 
 test: test-node
+	python3 -B -m unittest discover -s test -p 'test_*.py'
 	$(EMACS) -Q --batch $(INIT) $(OFFLINE) -L . -L test --eval '(setq load-prefer-newer t)' $(TESTS:%=-l %) -f ert-run-tests-batch-and-exit
 
 lint:

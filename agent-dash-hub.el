@@ -44,6 +44,13 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
   (expand-file-name "agent-dash-convert.mjs"
                     (file-name-directory (or load-file-name buffer-file-name))))
 
+(defconst agent-dash-hub--backup-file
+  (expand-file-name "agent-dash-session-backup.py"
+                    (file-name-directory agent-dash-hub--convert-file)))
+
+(defvar agent-dash-codex-directory)
+(defvar agent-dash-hermes-directory)
+
 (defconst agent-dash-hub--dsh-export-file
   (expand-file-name "agent-dash-dsh-export.mjs" (file-name-directory agent-dash-hub--convert-file)))
 
@@ -1280,6 +1287,277 @@ Candidates keep the list order and show the table header as their group."
   (interactive)
   (agent-dash-hub--convert-rows (agent-dash-hub--action-rows) 'export))
 
+;;;; Native backups
+
+(defcustom agent-dash-hub-dsh-backup-directory (or (getenv "DSH_HOME") "~/.dsh")
+  "DSH data root containing sessions and storages."
+  :type 'directory)
+
+(defun agent-dash-hub--backup-local (path)
+  "Return expanded local PATH, rejecting remote paths."
+  (when (file-remote-p path) (user-error "备份只支持本地路径"))
+  (expand-file-name path))
+
+(defun agent-dash-hub--backup-run (args done)
+  "Run backup ARGS asynchronously and call DONE with result or error."
+  (let ((out (generate-new-buffer " *agent-dash-backup*"))
+        (err (generate-new-buffer " *agent-dash-backup-errors*"))
+        (default-directory (file-name-directory agent-dash-hub--backup-file)))
+    (condition-case failure
+        (make-process
+         :name "agent-dash-backup"
+         :command (append (list "python3" agent-dash-hub--backup-file) args)
+         :buffer out :stderr err :connection-type 'pipe :coding 'utf-8-unix :noquery t
+         :sentinel (lambda (process event)
+                     (when (memq (process-status process) '(exit signal))
+                       (let* ((diagnostic (with-current-buffer err (string-trim (buffer-string))))
+                              (result (condition-case problem
+                                          (cons (with-current-buffer out
+                                                  (unless (zerop (buffer-size))
+                                                    (agent-dash-json-read (buffer-string)))) nil)
+                                        (error (cons nil (error-message-string problem))))))
+                         (unless (zerop (process-exit-status process))
+                           (let ((errors (agent-dash-jget (car result) "errors")))
+                             (setcdr result
+                                     (cond ((and (hash-table-p errors)
+                                                 (> (hash-table-count errors) 0))
+                                            (mapconcat (lambda (key)
+                                                         (format "%s: %s" key (gethash key errors)))
+                                                       (hash-table-keys errors) "；"))
+                                           ((not (string-empty-p diagnostic)) diagnostic)
+                                           (t (string-trim event))))))
+                         (kill-buffer out) (kill-buffer err)
+                         (funcall done (car result) (cdr result))))))
+      (error (kill-buffer out) (kill-buffer err) (signal (car failure) (cdr failure))))))
+
+(defun agent-dash-hub--backup-notices (result failure)
+  "Return backend warnings and errors from RESULT, falling back to FAILURE."
+  (let ((errors (agent-dash-jget result "errors")) lines)
+    (dolist (backend '("codex" "pi" "dsh" "hermes"))
+      (dolist (warning (agent-dash-jget result "backends" backend "warnings"))
+        (push (format "%s 提示：%s" backend warning) lines)))
+    (if (and (hash-table-p errors) (> (hash-table-count errors) 0))
+        (maphash (lambda (backend detail)
+                   (push (format "%s 错误：%s" backend detail) lines)) errors)
+      (when failure (push failure lines)))
+    (string-join (delete-dups (nreverse lines)) "\n")))
+
+(defun agent-dash-hub--backup-show-report (title file notices)
+  "Show a backup report with TITLE, FILE and NOTICES."
+  (let ((buffer (get-buffer-create "*Agent Dash · 备份报告*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert title "\n" file "\n\n" notices "\n")
+        (goto-char (point-min))
+        (special-mode)))
+    (display-buffer buffer)))
+
+(defun agent-dash-hub--backup-rows (selected)
+  "Return SELECTED rows, or all loaded rows, without silently dropping backends."
+  (let* ((rows (agent-dash-hub--all)) (selection (agent-dash-hub--selection)))
+    (when selected
+      (when (zerop (hash-table-count selection)) (user-error "请先选择会话"))
+      (setq rows (seq-filter (lambda (row) (gethash (plist-get row :key) selection)) rows))
+      (unless (= (length rows) (hash-table-count selection))
+        (user-error "选集含未加载的会话，请刷新后重选")))
+    (unless rows (user-error "没有已加载的会话"))
+    rows))
+
+(defun agent-dash-hub--backup-homes (backends)
+  "Return CLI home arguments for BACKENDS."
+  (cl-mapcan
+   (lambda (backend)
+     (list "--home" (symbol-name backend)
+           (agent-dash-hub--backup-local
+            (pcase backend
+              ('codex agent-dash-codex-directory)
+              ('pi agent-dash-pi-sessions-directory)
+              ('dsh agent-dash-hub-dsh-backup-directory)
+              ('hermes agent-dash-hermes-directory)))))
+   backends))
+
+(defun agent-dash-hub--backup-export (selected)
+  "Export SELECTED rows, or all loaded rows."
+  (let* ((rows (agent-dash-hub--backup-rows selected))
+         (unsupported (seq-remove
+                       (lambda (row) (memq (plist-get row :backend) '(codex pi dsh hermes))) rows)))
+    (when unsupported
+      (let ((counts (mapconcat (lambda (backend)
+                                 (format "%s %d" backend
+                                         (seq-count (lambda (row)
+                                                      (eq (plist-get row :backend) backend))
+                                                    unsupported)))
+                               (delete-dups (mapcar (lambda (row) (plist-get row :backend))
+                                                    unsupported)) "、")))
+        (unless (yes-or-no-p (format "不支持导出 %s；跳过这些会话并继续? " counts))
+          (user-error "已取消备份")))
+      (setq rows (seq-difference rows unsupported)))
+    (unless rows (user-error "没有支持导出的会话"))
+    (let* ((dir (agent-dash-hub--backup-local (read-directory-name "备份保存到文件夹：" nil nil t)))
+           (base (expand-file-name (format-time-string "agent-dash-backup-%Y%m%d%H%M%S%1N") dir))
+           (file (concat base ".zip"))
+           (suffix 0)
+           (backends (delete-dups (mapcar (lambda (row) (plist-get row :backend)) rows)))
+           (homes (agent-dash-hub--backup-homes backends)))
+      (while (or (file-exists-p file) (file-symlink-p file))
+        (setq file (format "%s-%d.zip" base (cl-incf suffix))))
+      (agent-dash-hub--backup-run
+       (append (list "export" "--output" file) homes
+               (cl-mapcan (lambda (row) (list "--session" (plist-get row :key))) rows))
+       (lambda (result error)
+         (let ((notices (agent-dash-hub--backup-notices result error))
+               (title (if error "备份导出失败" (format "已导出所选 %d 个会话" (length rows)))))
+           (if (string-empty-p notices) (message "%s：%s" title file)
+             (agent-dash-hub--backup-show-report title file notices)
+             (message "%s，详见备份报告" title)))))
+      (message "正在后台导出 %d 个会话…" (length rows)))))
+
+(defun agent-dash-hub-backup-export-selected ()
+  "Export selected sessions."
+  (interactive) (agent-dash-hub--backup-export t))
+
+(defun agent-dash-hub-backup-export-all ()
+  "Export all loaded sessions."
+  (interactive) (agent-dash-hub--backup-export nil))
+
+(defun agent-dash-hub--backup-active-ids ()
+  "Return backend-qualified IDs known to be active."
+  (let (ids)
+    (dolist (backend '(codex pi dsh hermes))
+      (dolist (row (plist-get (gethash backend agent-dash-hub--sources) :rows))
+        (when (or (agent-dash-hub-live-p row)
+                  (agent-dash-holder-alive-p (agent-dash-holder-dir backend (plist-get row :id))))
+          (push (format "%s:%s" backend (plist-get row :id)) ids))))
+    (dolist (session agent-dash--sessions)
+      (when (and (memq (agent-dash-session-backend session) '(codex pi dsh hermes))
+                 (buffer-live-p (agent-dash-session-buffer session))
+                 (not (eq (agent-dash-session-state session) 'dead))
+                 (agent-dash-data session :sid))
+        (push (format "%s:%s" (agent-dash-session-backend session)
+                      (agent-dash-data session :sid)) ids)))
+    (sort (delete-dups ids) #'string<)))
+
+(defun agent-dash-hub--backup-maps ()
+  "Read optional source to destination project directory mappings."
+  (let (args)
+    (while (yes-or-no-p "添加项目目录映射? ")
+      (let ((old (agent-dash-hub--backup-local (read-directory-name "备份中的原目录：")))
+            (new (agent-dash-hub--backup-local (read-directory-name "本机目标目录：" nil nil t))))
+        (unless (file-directory-p new) (user-error "映射目标目录不存在：%s" new))
+        (setq args (append args (list "--map" (directory-file-name old)
+                                      (directory-file-name new))))))
+    args))
+
+(defun agent-dash-hub-backup-import ()
+  "Inspect a native backup before previewing it."
+  (interactive)
+  (let ((file (agent-dash-hub--backup-local (read-file-name "选择备份 ZIP：" nil nil t)))
+        (hub (current-buffer)))
+    (agent-dash-hub--backup-run
+     (list "inspect" "--input" file)
+     (lambda (result error)
+       (if error (message "读取备份失败：%s" error)
+         (let ((backends (agent-dash-jget result "backends")))
+           (if (and (listp backends) backends
+                    (seq-every-p (lambda (b) (member b '("codex" "pi" "dsh" "hermes"))) backends))
+               (when (buffer-live-p hub)
+                 (with-current-buffer hub
+                   (agent-dash-hub--backup-preview file (mapcar #'intern backends))))
+             (message "读取备份失败：后端列表无效"))))))))
+
+(defun agent-dash-hub--backup-preview (file backends)
+  "Preview FILE for BACKENDS and confirm before importing."
+  (when (and (memq 'dsh backends)
+             (not (yes-or-no-p "DSH 恢复期间必须停止目标 Host，确认已停止且不会重启? ")))
+    (user-error "已取消 DSH 备份导入"))
+  (let* ((homes (agent-dash-hub--backup-homes backends))
+         (maps (agent-dash-hub--backup-maps))
+         (active (agent-dash-hub--backup-active-ids))
+         (active-args (cl-mapcan (lambda (id) (list "--active-session" id)) active))
+         (hub (current-buffer)))
+    (agent-dash-hub--backup-run
+     (append (list "preview" "--input" file) homes maps active-args)
+     (lambda (result error)
+       (if error
+           (progn (agent-dash-hub--backup-show-report
+                   "备份预览失败" file (agent-dash-hub--backup-notices result error))
+                  (message "备份预览失败，详见备份报告"))
+         (condition-case problem
+             (let ((token (agent-dash-jget result "preview_token"))
+                   (sessions (agent-dash-jget result "sessions"))
+                   (report (get-buffer-create "*Agent Dash · 备份预览*")))
+               (unless (and (stringp token) (listp sessions)) (error "备份预览结果不完整"))
+               (with-current-buffer report
+                 (let ((inhibit-read-only t))
+                   (erase-buffer)
+                   (insert (format "原生备份：%s\n" file))
+                   (let ((count (lambda (action)
+                                  (seq-count (lambda (session)
+                                               (equal action (agent-dash-jget session "action")))
+                                             sessions))))
+                     (insert (format "新增 %d · 覆盖 %d · 相同跳过 %d · 使用中跳过 %d\n\n"
+                                     (funcall count "create") (funcall count "overwrite")
+                                     (funcall count "skip") (funcall count "busy"))))
+                   (let ((notices (agent-dash-hub--backup-notices result nil)))
+                     (unless (string-empty-p notices) (insert notices "\n\n")))
+                   (dolist (session sessions)
+                     (let ((backend (agent-dash-jget session "backend"))
+                           (id (agent-dash-jget session "id"))
+                           (action (agent-dash-jget session "action"))
+                           (path (agent-dash-jget session "path")))
+                       (unless (and (member backend '("codex" "pi" "dsh" "hermes"))
+                                    (stringp id) (stringp path)
+                                    (member action '("create" "overwrite" "skip" "busy")))
+                         (error "备份预览条目不完整"))
+                       (insert (format "%s  %s:%s  %s\n"
+                                       (pcase action ("create" "新增") ("overwrite" "覆盖")
+                                              ("busy" "使用中跳过") (_ "相同跳过")) backend id path))))
+                   (special-mode)))
+               (display-buffer report)
+               (when (yes-or-no-p "覆盖前将保存回滚快照；确认按预览导入? ")
+                 (unless (equal active (agent-dash-hub--backup-active-ids))
+                   (error "活动会话已改变，请重新预览"))
+                 (dolist (session sessions)
+                   (when (and (member (agent-dash-jget session "action") '("create" "overwrite"))
+                              (agent-dash-holder-alive-p
+                               (agent-dash-holder-dir (intern (agent-dash-jget session "backend"))
+                                                      (agent-dash-jget session "id"))))
+                     (error "目标会话正在运行，请关闭后重新预览：%s" (agent-dash-jget session "id"))))
+                 (agent-dash-hub--backup-run
+                  (append (list "import" "--input" file "--preview-token" token)
+                          homes maps active-args)
+                  (lambda (reply failure)
+                    (when (buffer-live-p report)
+                      (with-current-buffer report
+                        (let ((inhibit-read-only t))
+                          (goto-char (point-max))
+                          (insert (format "\n导入结果：%s\n" (if failure "有后端失败" "完成")))
+                          (let ((notices (agent-dash-hub--backup-notices reply failure)))
+                            (unless (string-empty-p notices) (insert notices "\n")))
+                          (when (member "dsh" (agent-dash-jget reply "affected_backends"))
+                            (insert "DSH 维护完成后，请自行重新启动 Host，再回到 Hub 按 g 刷新。\n"))
+                          (dolist (backend '(codex pi dsh hermes))
+                            (let* ((entry (agent-dash-jget reply "backends" (symbol-name backend)))
+                                   (rollback (agent-dash-jget entry "rollback_path"))
+                                   (archive (agent-dash-jget entry "rollback_archive_path")))
+                              (dolist (item (list (cons (format "%s 回滚快照：" backend) rollback)
+                                                  (cons "通过 B i 导入回滚包：" archive)))
+                                (when (stringp (cdr item))
+                                  (insert (car item))
+                                  (insert-text-button (cdr item) 'follow-link t
+                                                      'action (lambda (button)
+                                                                (find-file (button-label button))))
+                                  (insert "\n")))))))
+                      (display-buffer report))
+                    (when (buffer-live-p hub)
+                      (dolist (backend (agent-dash-jget reply "affected_backends"))
+                        (when (member backend '("codex" "pi" "hermes"))
+                          (agent-dash-hub--reload-after-conversion (intern backend)))))
+                    (message "备份导入%s" (if failure "有后端失败，详见备份预览" "完成"))))))
+           (error (message "备份导入已停止：%s" (error-message-string problem)))))))
+    (message "正在后台预览备份…")))
+
 (defun agent-dash-hub-convert-project ()
   "Convert all loaded Claude and Codex sessions in the project at point."
   (interactive)
@@ -1710,6 +1988,15 @@ whole original conversation."
    ["返回"
     ("q" "关闭菜单" transient-quit-one :transient nil)]])
 
+(transient-define-prefix agent-dash-hub-backup-menu ()
+  "Export or import native backups."
+  :display-action agent-dash-hub--display
+  ["原生备份"
+   ("s" "导出已选会话" agent-dash-hub-backup-export-selected)
+   ("a" "导出全部已加载会话" agent-dash-hub-backup-export-all)
+   ("i" "预览并导入备份" agent-dash-hub-backup-import)
+   ("q" "关闭菜单" transient-quit-one :transient nil)])
+
 (transient-define-prefix agent-dash-hub-help-menu ()
   "Hub commands; the same keys work directly in the list."
   :variable-pitch t
@@ -1747,6 +2034,7 @@ whole original conversation."
     ("u" "清除当前行的选择和待删标记" agent-dash-hub-unmark-delete)
     ("x" "确认删除" agent-dash-hub-execute-deletions)
     ("v" "转换会话" agent-dash-hub-convert-menu)
+    ("B" "原生备份" agent-dash-hub-backup-menu)
     ("D" "项目重定向" agent-dash-hub-relocate-project)
     ("!" "诊断" agent-dash-hub-diagnostics)]
    ["其他"
@@ -1785,6 +2073,7 @@ whole original conversation."
   "Keymap for `agent-dash-hub-mode'.")
 
 (define-key agent-dash-hub-mode-map (kbd "v") #'agent-dash-hub-convert-menu)
+(define-key agent-dash-hub-mode-map (kbd "B") #'agent-dash-hub-backup-menu)
 (define-key agent-dash-hub-mode-map (kbd "m") #'agent-dash-hub-toggle-selection)
 (define-key agent-dash-hub-mode-map (kbd "M") #'agent-dash-hub-select-all)
 (define-key agent-dash-hub-mode-map (kbd "U") #'agent-dash-hub-clear-selection)
@@ -1799,7 +2088,7 @@ TAB 折叠/展开当前分组；Shift-TAB 全部折叠/展开。
 i 详情/对话；s 语义搜索/问答；r 生成摘要；R 重试失败摘要（需 `agent-dash-summary-mode'）。
 m 切换选中并移到下一会话；M 全选当前筛选的已加载会话（含折叠）；U 清空选择。
 v s 转换到 Pi；v d 导出 DSH 包；均优先处理选集，空选集处理当前行。
-v p 转换当前项目；v b 转换指定后端。
+v p 转换当前项目；v b 转换指定后端；B Codex 备份菜单。
 d 标记已选会话或当前行待删除；u 清除当前行选择和删除标记；x 确认执行全部删除标记。
 D 项目目录重定向；! 诊断。
 w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
