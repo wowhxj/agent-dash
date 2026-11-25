@@ -212,6 +212,24 @@ once; RETRIED marks that second attempt."
                         (hash-table-keys arguments) " ")))
         (t "")))
 
+(defun agent-dash-dsh--model-reasoning (session provider model)
+  "Return the cached reasoning metadata for SESSION's PROVIDER and MODEL."
+  (let* ((groups (agent-dash-jget (agent-dash-data session :model-catalog) "groups"))
+         (group (seq-find (lambda (entry) (equal (agent-dash-jget entry "id") provider))
+                          groups))
+         (entry (seq-find (lambda (entry) (equal (agent-dash-jget entry "id") model))
+                          (agent-dash-jget group "models"))))
+    (agent-dash-jget entry "reasoning")))
+
+(defun agent-dash-dsh--selection-thinking (session selection)
+  "Return SESSION's header label for the reasoning effort in SELECTION."
+  (or (agent-dash-jget selection "reasoningEffort")
+      (let ((reasoning (agent-dash-dsh--model-reasoning
+                        session (agent-dash-jget selection "provider")
+                        (agent-dash-jget selection "model"))))
+        (or (agent-dash-jget reasoning "defaultEffort")
+            (when (agent-dash-jget reasoning "efforts") "Default")))))
+
 (defun agent-dash-dsh--publish-metrics (session values)
   "Normalize cached DSH projection VALUES into SESSION's shared UI metadata."
   (let* ((pressure (gethash "contextPressure" values))
@@ -246,7 +264,7 @@ once; RETRIED marks that second attempt."
                        context))
                    :model (agent-dash-jget selection "model")
                    :provider (agent-dash-jget selection "provider")
-                   :thinking (agent-dash-jget selection "reasoningEffort")
+                   :thinking (agent-dash-dsh--selection-thinking session selection)
                    :agent-preset (gethash "agentPreset" values)
                    :permission (agent-dash-jget (gethash "permissions" values)
                                                 "currentValue")
@@ -547,14 +565,20 @@ This runs on protocol input, never during display-only redraw."
 
 ;;;; Backend methods
 
+(defun agent-dash-dsh--read-model-catalog (session)
+  "Fetch and cache the DSH model catalog for SESSION."
+  (agent-dash-set-data
+   session :model-catalog
+   (agent-dash-dsh--call "session/modelCatalog" (make-hash-table :test #'equal))))
+
 (defun agent-dash-dsh--load-default-model (session)
   "Read SESSION's Host default model without selecting it or invoking inference."
   (condition-case err
       (agent-dash-set-data
        session :default-model-selection
-       (agent-dash-jget (agent-dash-dsh--call "session/modelCatalog"
-                                              (make-hash-table :test #'equal)) "default"))
+       (agent-dash-jget (agent-dash-dsh--read-model-catalog session) "default"))
     (error
+     (agent-dash-set-data session :model-catalog nil)
      (agent-dash-set-data session :default-model-selection nil)
      (agent-dash-emit session (list :type 'notice :id "dsh-default-model-error"
                                     :level 'warning :text (error-message-string err)))))
@@ -663,7 +687,7 @@ This runs on protocol input, never during display-only redraw."
 
 (cl-defmethod agent-dash-backend-models ((_ (eql dsh)) session)
   "Return provider-qualified model choices for SESSION from the DSH catalog."
-  (let ((catalog (agent-dash-dsh--call "session/modelCatalog" nil)) choices)
+  (let ((catalog (agent-dash-dsh--read-model-catalog session)) choices)
     (dolist (group (agent-dash-jget catalog "groups"))
       (dolist (model (agent-dash-jget group "models"))
         (let ((provider (agent-dash-jget group "id"))
@@ -677,21 +701,50 @@ This runs on protocol input, never during display-only redraw."
     (agent-dash-set-data session :model-choices (nreverse choices))
     (mapcar #'car (agent-dash-data session :model-choices))))
 
+(defun agent-dash-dsh--select-model (session selection)
+  "Send model SELECTION to the DSH Host and update SESSION's header."
+  (let* ((result (agent-dash-dsh--call
+                  "session/selectModel"
+                  (list :request
+                        (append (list :sessionId (agent-dash-data session :sid)) selection))))
+         (selected (agent-dash-jget result "selected")))
+    (agent-dash-emit
+     session (list :type 'meta
+                   :model (agent-dash-jget selected "model")
+                   :provider (agent-dash-jget selected "provider")
+                   :thinking (agent-dash-dsh--selection-thinking session selected)))))
+
 (cl-defmethod agent-dash-backend-set-model ((_ (eql dsh)) session model)
   "Select MODEL for SESSION via the DSH API, not the slash command registry."
   (unless (agent-dash-data session :model-choices)
     (agent-dash-backend-models 'dsh session))
   (let ((selection (cdr (assoc model (agent-dash-data session :model-choices)))))
     (unless selection (user-error "Unknown DSH model: %s" model))
-    (let* ((result (agent-dash-dsh--call
-                    "session/selectModel"
-                    (list :request
-                          (append (list :sessionId (agent-dash-data session :sid)) selection))))
-           (selected (agent-dash-jget result "selected")))
-      (agent-dash-emit session (list :type 'meta
-                                     :model (agent-dash-jget selected "model")
-                                     :provider (agent-dash-jget selected "provider")
-                                     :thinking (agent-dash-jget selected "reasoningEffort"))))))
+    (agent-dash-dsh--select-model session selection)))
+
+(defun agent-dash-dsh-set-thinking (session args)
+  "Set the reasoning effort for SESSION's current model, or pick it if ARGS is empty."
+  (agent-dash-dsh--read-model-catalog session)
+  (let* ((meta (agent-dash-session-meta session))
+         (provider (plist-get meta :provider))
+         (model (plist-get meta :model))
+         (reasoning (agent-dash-dsh--model-reasoning session provider model))
+         (levels (mapcar (lambda (entry) (agent-dash-jget entry "id"))
+                         (agent-dash-jget reasoning "efforts"))))
+    (unless model (user-error "Select a DSH model with /model first"))
+    (unless levels (user-error "No reasoning levels are available for %s/%s" provider model))
+    (let* ((choices (cons "default" levels))
+           (input (if (string-empty-p args)
+                      (completing-read "Thinking: " choices nil t) args))
+           (level (assoc-string input choices t))
+           (current (agent-dash-session-meta session)))
+      (unless level (user-error "Unknown DSH thinking level: %s" input))
+      (unless (and (equal provider (plist-get current :provider))
+                   (equal model (plist-get current :model)))
+        (user-error "The DSH model changed; run /thinking again"))
+      (agent-dash-dsh--select-model
+       session (append (list :provider provider :model model)
+                       (unless (equal level "default") (list :reasoningEffort level)))))))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql dsh)) session text images mode)
   "DSH `agent-dash-backend-send' for SESSION, TEXT, IMAGES and MODE."

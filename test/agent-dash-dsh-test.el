@@ -48,6 +48,52 @@
           (should (agent-dash-input-dispatch "/model"))
           (should (equal (plist-get (plist-get (cdr (car calls)) :request) :provider) "other")))))))
 
+(ert-deftest agent-dash-dsh-test-thinking-command ()
+  "Complete, select and reset an effort on the current provider's model."
+  (let ((session (agent-dash-session-create 'dsh "/tmp"))
+        (draft "/thinking") requests)
+    (agent-dash-set-data session :sid "session-1")
+    (agent-dash-set-data session :commands-loaded t)
+    (with-temp-buffer
+      (setq-local agent-dash--session session)
+      (cl-letf (((symbol-function 'agent-dash--input) (lambda () draft))
+                ((symbol-function 'agent-dash--set-input) (lambda (text) (setq draft text)))
+                ((symbol-function 'completing-read)
+                 (lambda (_ choices &rest _)
+                   (should (equal choices '("default" "high")))
+                   "high"))
+                ((symbol-function 'agent-dash-dsh--call)
+                 (lambda (method &optional args _retry)
+                   (pcase method
+                     ("session/modelCatalog"
+                      (agent-dash-json-read
+                       (concat "{\"default\":{\"provider\":\"proxy\",\"model\":\"org/model\"},"
+                               "\"groups\":[{\"id\":\"other\",\"models\":[{\"id\":\"org/model\"}]},"
+                               "{\"id\":\"proxy\",\"models\":[{\"id\":\"org/model\","
+                               "\"reasoning\":{\"efforts\":[{\"id\":\"high\"}]}}]}]}")))
+                     ("session/selectModel"
+                      (let ((request (plist-get args :request)))
+                        (push request requests)
+                        (agent-dash-json-read (json-serialize (list :selected request)))))
+                     (_ (ert-fail (format "Unexpected RPC: %s" method)))))))
+        (agent-dash-dsh--load-default-model session)
+        (should (string-search "Default" (get-text-property 0 'help-echo (agent-dash--header))))
+        (should (assoc "thinking" (agent-dash-input--commands session)))
+        (should (agent-dash-input-dispatch "/thinking"))
+        (should (equal (car requests)
+                       '(:sessionId "session-1" :provider "proxy" :model "org/model"
+                                    :reasoningEffort "high")))
+        (should (equal draft ""))
+        (should (equal (plist-get (agent-dash-session-meta session) :thinking) "high"))
+        (setq draft "/thinking low")
+        (should-error (agent-dash-input-dispatch draft) :type 'user-error)
+        (should (equal draft "/thinking low"))
+        (should (agent-dash-input-dispatch "/thinking default"))
+        (should (equal (car requests)
+                       '(:sessionId "session-1" :provider "proxy" :model "org/model")))
+        (should (= (length requests) 2))
+        (should (equal (plist-get (agent-dash-session-meta session) :thinking) "Default"))))))
+
 (ert-deftest agent-dash-dsh-test-select-model-wire-request ()
   "The gateway descriptor names the selectModel JSON parameter request."
   (let ((s (agent-dash-session-create 'dsh "/tmp"))

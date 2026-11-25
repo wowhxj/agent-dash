@@ -22,6 +22,7 @@
 (declare-function agent-dash-open "agent-dash-ui")
 (declare-function agent-dash-resume "agent-dash-ui")
 (declare-function agent-dash-select-model "agent-dash-ui")
+(declare-function agent-dash-dsh-set-thinking "agent-dash-dsh")
 (declare-function agent-dash-cancel "agent-dash-ui")
 (declare-function agent-dash-quit "agent-dash-ui")
 (declare-function agent-dash-hub "agent-dash-hub")
@@ -109,6 +110,8 @@ Pi uses its native catalog without adding client-only slash names."
          (seen (make-hash-table :test #'equal)))
     (when (agent-dash-capability session :models)
       (setq local (append local '(("model" . "Select a model")))))
+    (when (eq backend 'dsh)
+      (setq local (append local '(("thinking" . "Set thinking level")))))
     (when (or refresh (not (agent-dash-data session :commands-loaded)))
       (agent-dash-set-data
        session :command-catalog
@@ -199,9 +202,10 @@ Native commands return nil and are dispatched through the backend protocol."
            (origin (current-buffer))
            (draft (agent-dash--input)))
       (when (or (member command '("help" "new" "resume" "dash" "stop" "quit"))
+                (and (eq backend 'dsh) (equal command "thinking"))
                 (and (equal command "model") (agent-dash-capability session :models)
                      (not (and (eq backend 'pi) (not (string-empty-p args))))))
-        (unless (string-empty-p args)
+        (unless (or (equal command "thinking") (string-empty-p args))
           (user-error "/%s does not accept arguments; use its picker" command))
         (pcase command
           ("help"
@@ -217,7 +221,8 @@ Native commands return nil and are dispatched through the backend protocol."
           ("dash" (require 'agent-dash-hub) (agent-dash-hub))
           ("stop" (agent-dash-cancel))
           ("quit" (agent-dash-quit))
-          ("model" (agent-dash-select-model)))
+          ("model" (agent-dash-select-model))
+          ("thinking" (agent-dash-dsh-set-thinking session args)))
         ;; Pickers may switch buffers.  C-g/errors preserve the original draft;
         ;; a declined /quit also keeps it.  Never clear a changed draft.
         (when (and (buffer-live-p origin) (not (equal command "quit")))
