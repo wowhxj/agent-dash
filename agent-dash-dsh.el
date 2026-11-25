@@ -802,39 +802,42 @@ This runs on protocol input, never during display-only redraw."
                                                                  picked)))
                                               (list :custom (string-join custom ", "))))))))))))
 
+(defun agent-dash-dsh--dialogue-message (event)
+  "Extract a spoken user or assistant message from EVENT."
+  (let* ((data (agent-dash-jget event "data"))
+         (message (agent-dash-jget data "message"))
+         (role (pcase (agent-dash-jget event "type")
+                 ("user/message"
+                  (setq message (or message data))
+                  (when (member (agent-dash-jget message "source" "kind") '(nil "user"))
+                    'user))
+                 ("assistant/message" 'assistant))))
+    (when role
+      (let ((text (agent-dash-dsh--text (agent-dash-jget message "content") "text")))
+        (unless (string-blank-p text) (cons role text))))))
+
 (cl-defmethod agent-dash-backend-transcript ((_ (eql dsh)) id)
-  "DSH `agent-dash-backend-transcript' for ID, read from a follow snapshot."
-  (let ((reader (agent-dash-session-create 'dsh "/"))
-        (snapshot nil) (failure nil) socket)
-    (agent-dash-set-data reader :sid id)
-    (setq socket
-          (agent-dash-dsh--socket
-           (lambda (ws)
-             (websocket-send-text
-              ws (agent-dash-dsh--open-frame
-                  id "session/follow"
-                  (list :request (list :address (list :kind "session" :sessionId id)
-                                       ;; a session longer than this is cut.
-                                       :maxMessages 100000)))))
-           (lambda (data)
-             (when (equal (agent-dash-jget data "streamId") id)
-               (pcase (agent-dash-jget data "type")
-                 ("error" (setq failure (agent-dash-jget data "error" "message")))
-                 ("item" (when (equal (agent-dash-jget data "value" "type") "snapshot")
-                           (setq snapshot (agent-dash-jget data "value")))))))))
-    (unwind-protect
-        (with-timeout (60 (error "DSH 读取会话超时"))
-          (while (not (or snapshot failure)) (accept-process-output nil 0.05)))
-      (when (websocket-openp socket) (websocket-close socket)))
-    (when failure (error "DSH: %s" failure))
-    (dolist (record (agent-dash-jget snapshot "records"))
-      (agent-dash-dsh--event reader (agent-dash-jget record "event")))
-    (delq nil (mapcar (lambda (item)
-                        (let ((text (plist-get item :text)))
-                          (when (and (memq (plist-get item :type) '(user assistant))
-                                     (stringp text) (not (string-blank-p text)))
-                            (cons (plist-get item :type) text))))
-                      (agent-dash-session-items reader)))))
+  "Read ID's dialogue from bounded DSH history pages in chronological order."
+  (let ((address (list :kind "session" :sessionId id))
+        (more t) before transcript)
+    (while more
+      (let* ((page (agent-dash-dsh--call
+                    "session/events"
+                    (list :request (append (list :address address :maxMessages 100)
+                                           (when before (list :beforeSeq before))))))
+             (records (agent-dash-jget page "records")))
+        ;; Each page is chronological, and beforeSeq is exclusive.
+        (dolist (record (reverse records))
+          (when-let* ((message (agent-dash-dsh--dialogue-message
+                                (agent-dash-jget record "event"))))
+            (push message transcript)))
+        (setq more (agent-dash-jget page "hasMore"))
+        (when more
+          (let ((next (agent-dash-jget (car records) "event" "seq")))
+            (unless (and (integerp next) (> next 0) (or (not before) (< next before)))
+              (error "DSH history pagination did not advance for %s" id))
+            (setq before next)))))
+    transcript))
 
 (defun agent-dash-dsh--prompts (id)
   "Return the user prompts of session ID from the Host's projection cache.

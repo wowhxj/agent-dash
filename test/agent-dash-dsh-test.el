@@ -81,6 +81,39 @@
     (should-error (agent-dash-backend-models 'dsh (agent-dash-session-create 'dsh "/tmp"))
                   :type 'user-error)))
 
+(ert-deftest agent-dash-dsh-test-transcript-pages ()
+  "Read all pages in order, extracting only visible dialogue."
+  (let (requests)
+    (cl-letf (((symbol-function 'agent-dash-dsh--call)
+               (lambda (method args)
+                 (should (equal method "session/events"))
+                 (push (plist-get args :request) requests)
+                 (agent-dash-json-read
+                  (json-serialize
+                   (if (plist-get (car requests) :beforeSeq)
+                       '(:hasMore :false
+                                  :records [(:event (:seq 0 :type "user/message"
+                                                          :data (:content [(:type "text" :text "first")
+                                                                           (:type "image")])))
+                                            (:event (:seq 1 :type "user/message"
+                                                          :data (:message (:source (:kind "system")
+                                                                                   :content [(:type "text"
+                                                                                                    :text "injected")]))))])
+                     '(:hasMore t
+                                :records [(:event (:seq 2 :type "tool/result"))
+                                          (:event (:seq 3 :type "assistant/message"
+                                                        :data (:message (:content [(:type "reasoning"
+                                                                                          :text "hidden")
+                                                                                   (:type "text"
+                                                                                          :text "last")]))))]))
+                   :false-object :false)))))
+      (should (equal (agent-dash-backend-transcript 'dsh "fixture")
+                     '((user . "first") (assistant . "last"))))
+      (should (equal (nreverse requests)
+                     '((:address (:kind "session" :sessionId "fixture") :maxMessages 100)
+                       (:address (:kind "session" :sessionId "fixture") :maxMessages 100
+                                 :beforeSeq 2)))))))
+
 (ert-deftest agent-dash-dsh-test-turn ()
   (let ((s (agent-dash-session-create 'dsh "/tmp")))
     (dolist (f '("{\"type\":\"item\",\"value\":{\"type\":\"event\",\"event\":{\"seq\":1,\"type\":\"turn/start\",\"data\":{}}}}"
