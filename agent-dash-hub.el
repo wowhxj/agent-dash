@@ -1053,8 +1053,15 @@ Candidates keep the list order and show the table header as their group."
 (defvar-local agent-dash-hub--report-kept 0)
 (defvar-local agent-dash-hub--report-warned 0)
 
+(defun agent-dash-hub-close-view ()
+  "Close the current view and kill its buffer."
+  (interactive)
+  (quit-window t))
+
 (define-derived-mode agent-dash-hub-report-mode special-mode "转换报告"
   "View the results of a Hub conversion batch.")
+
+(define-key agent-dash-hub-report-mode-map (kbd "q") #'agent-dash-hub-close-view)
 
 (defun agent-dash-hub-report-toggle ()
   "Expand or collapse the conversion under point."
@@ -1350,7 +1357,8 @@ Candidates keep the list order and show the table header as their group."
         (erase-buffer)
         (insert title "\n" file "\n\n" notices "\n")
         (goto-char (point-min))
-        (special-mode)))
+        (special-mode)
+        (local-set-key (kbd "q") #'agent-dash-hub-close-view)))
     (display-buffer buffer)))
 
 (defun agent-dash-hub--backup-rows (selected)
@@ -1528,7 +1536,8 @@ Candidates keep the list order and show the table header as their group."
                        (insert (format "%s  %s:%s  %s\n"
                                        (pcase action ("create" "新增") ("overwrite" "覆盖")
                                               ("busy" "使用中跳过") (_ "相同跳过")) backend id path))))
-                   (special-mode)))
+                   (special-mode)
+                   (local-set-key (kbd "q") #'agent-dash-hub-close-view)))
                (display-buffer report)
                (when (or (not (seq-some (lambda (session)
                                            (equal (agent-dash-jget session "action") "overwrite"))
@@ -1680,6 +1689,8 @@ Candidates keep the list order and show the table header as their group."
   (let ((visible (length (agent-dash-hub--visible))) (total (length (agent-dash-hub--all))))
     (agent-dash-select-tab)
     (with-help-window "*agent-dash diagnostics*"
+      (with-current-buffer standard-output
+        (local-set-key (kbd "q") #'agent-dash-hub-close-view))
       (princ (format "显示 %d/已载入 %d；过滤/隐藏 %d。\n\n" visible total (- total visible)))
       (dolist (backend agent-dash-backends)
         (let ((source (gethash backend agent-dash-hub--sources)))
@@ -1700,12 +1711,16 @@ Candidates keep the list order and show the table header as their group."
                          (plist-get (agent-dash-summary-entry row) :failures))))))))
 
 (defun agent-dash-hub-quit ()
-  "Leave the `agent-dash' tab without closing its buffers."
+  "Close the Hub buffer and return to the previous tab when possible."
   (interactive)
   (if (and (equal (alist-get 'name (tab-bar--current-tab)) "agent-dash")
            (cdr (tab-bar-tabs)))
-      (tab-bar-switch-to-recent-tab)
-    (quit-window)))
+      (if (one-window-p t)
+          (when (kill-buffer (current-buffer)) (tab-bar-close-tab))
+        (let ((buffer (current-buffer)))
+          (quit-window t)
+          (unless (buffer-live-p buffer) (tab-bar-switch-to-recent-tab))))
+    (quit-window t)))
 
 ;;;; Details
 
@@ -1886,6 +1901,7 @@ Candidates keep the list order and show the table header as their group."
 (defvar agent-dash-hub-details-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "q") #'agent-dash-hub-close-view)
     (define-key map (kbd "RET") #'agent-dash-hub-details-open)
     (define-key map (kbd "m") #'agent-dash-hub-details-toggle-metadata)
     (define-key map (kbd "g") #'agent-dash-hub-details-refresh)

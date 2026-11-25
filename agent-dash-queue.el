@@ -379,7 +379,7 @@ Do not close anything if killing is declined, and never delete the last window."
 (defun agent-dash-queue-quit ()
   "Close the queue window without deleting queued messages."
   (interactive)
-  (agent-dash-queue--close-view))
+  (agent-dash-queue--close-view t))
 
 (defvar agent-dash-queue-mode-map
   (let ((map (make-sparse-keymap)))
