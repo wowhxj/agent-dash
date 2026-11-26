@@ -336,9 +336,9 @@
                                                                  :content (vector block)))))))
         ('hermes
          (dolist (kind '("user_message_chunk" "agent_message_chunk"))
-           (agent-dash-hermes--update session (agent-dash-images-test--json
+           (agent-dash-acp-update session (agent-dash-images-test--json
                                                (list :sessionUpdate kind :content block))))
-         (agent-dash-hermes--update
+         (agent-dash-acp-update
           session (agent-dash-images-test--json
                    (list :sessionUpdate "tool_call_update" :toolCallId "tool" :status "completed"
                          :content (vector (list :type "content" :content block)))))))

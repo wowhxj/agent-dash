@@ -23,6 +23,7 @@
 (declare-function agent-dash-resume "agent-dash-ui")
 (declare-function agent-dash-select-model "agent-dash-ui")
 (declare-function agent-dash-dsh-set-thinking "agent-dash-dsh")
+(declare-function agent-dash-agy-set-thinking "agent-dash-agy")
 (declare-function agent-dash-cancel "agent-dash-ui")
 (declare-function agent-dash-quit "agent-dash-ui")
 (declare-function agent-dash-hub "agent-dash-hub")
@@ -110,7 +111,7 @@ Pi uses its native catalog without adding client-only slash names."
          (seen (make-hash-table :test #'equal)))
     (when (agent-dash-capability session :models)
       (setq local (append local '(("model" . "Select a model")))))
-    (when (eq backend 'dsh)
+    (when (memq backend '(dsh agy))
       (setq local (append local '(("thinking" . "Set thinking level")))))
     (when (or refresh (not (agent-dash-data session :commands-loaded)))
       (agent-dash-set-data
@@ -202,7 +203,7 @@ Native commands return nil and are dispatched through the backend protocol."
            (origin (current-buffer))
            (draft (agent-dash--input)))
       (when (or (member command '("help" "new" "resume" "dash" "stop" "quit"))
-                (and (eq backend 'dsh) (equal command "thinking"))
+                (and (memq backend '(dsh agy)) (equal command "thinking"))
                 (and (equal command "model") (agent-dash-capability session :models)
                      (not (and (eq backend 'pi) (not (string-empty-p args))))))
         (unless (or (equal command "thinking") (string-empty-p args))
@@ -222,7 +223,9 @@ Native commands return nil and are dispatched through the backend protocol."
           ("stop" (agent-dash-cancel))
           ("quit" (agent-dash-quit))
           ("model" (agent-dash-select-model))
-          ("thinking" (agent-dash-dsh-set-thinking session args)))
+          ("thinking" (if (eq backend 'agy)
+                          (agent-dash-agy-set-thinking session args)
+                        (agent-dash-dsh-set-thinking session args))))
         ;; Pickers may switch buffers.  C-g/errors preserve the original draft;
         ;; a declined /quit also keeps it.  Never clear a changed draft.
         (when (and (buffer-live-p origin) (not (equal command "quit")))

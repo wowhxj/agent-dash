@@ -128,8 +128,10 @@ async function checkStore(phase) {
   }
 }
 
-if (process.argv.length === 2) {
+if (process.argv.length === 2 || process.argv[2] === 'agy') {
   const { DSH_INSTALL_DIR, DSH_NODE_EXECUTABLE, PATH } = process.env;
+  const backend = process.argv[2] ?? 'claude';
+  assert.ok(['claude', 'agy'].includes(backend));
   assert.ok(DSH_INSTALL_DIR && DSH_NODE_EXECUTABLE, 'Run with DSH_INSTALL_DIR and DSH_NODE_EXECUTABLE from the installed DSH runtime');
   const tmp = realpathSync(tmpdir());
   const root = mkdtempSync(join(tmp, 'agent-dash-verify-dsh-'));
@@ -137,9 +139,17 @@ if (process.argv.length === 2) {
   try {
     const project = join(root, 'project'), source = join(root, 'synthetic.jsonl');
     mkdirSync(project);
-    const rows = [['user', question], ['assistant', answer]].map(([role, content]) => ({ type: role, timestamp: '2026-01-01T00:00:00Z', sessionId: 'synthetic', message: { role, content } }));
+    const timestamp = '2026-01-01T00:00:00Z';
+    const sessionId = 'synthetic';
+    const rows = backend === 'agy' ? [
+      { type: 'agy_session', sessionId, timestamp, model: 'gemini-test' },
+      ...[['user_message_chunk', question], ['agent_message_chunk', answer]].map(([sessionUpdate, text]) =>
+        ({ method: 'session/update', params: { sessionId, update: { sessionUpdate, content: { type: 'text', text } } } })),
+    ] : [['user', question], ['assistant', answer]].map(([role, content]) =>
+      ({ type: role, timestamp, sessionId, message: { role, content } }));
     writeFileSync(source, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
-    const exported = execFileSync(DSH_NODE_EXECUTABLE, [exporter, 'claude', source, 'synthetic', project, join(root, 'pi'), join(root, 'archives')], { cwd: root, env });
+    const exported = execFileSync(DSH_NODE_EXECUTABLE,
+      [exporter, backend, source, sessionId, project, join(root, 'pi'), join(root, 'archives')], { cwd: root, env });
     writeFileSync(join(root, 'export.json'), exported);
     for (const phase of ['import', 'append', 'verify']) {
       execFileSync(DSH_NODE_EXECUTABLE, [script, phase], { cwd: root, env, stdio: 'inherit' });

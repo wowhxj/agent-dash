@@ -17,7 +17,7 @@ import zipfile
 from agent_dash_backup_paths import absolute_source
 
 ROOT = Path(__file__).resolve().parent
-BACKENDS = {'codex': ('python', 'agent-dash-backup.py'), 'pi': ('python', 'agent-dash-pi-backup.py'), 'dsh': ('python', 'agent-dash-dsh-backup.py'), 'hermes': ('python', 'agent-dash-hermes-backup.py')}
+BACKENDS = {'codex': ('python', 'agent-dash-backup.py'), 'pi': ('python', 'agent-dash-pi-backup.py'), 'dsh': ('python', 'agent-dash-dsh-backup.py'), 'hermes': ('python', 'agent-dash-hermes-backup.py'), 'agy': ('python', 'agent-dash-agy-backup.py')}
 LIMIT = 2 * 1024 * 1024 * 1024
 TOTAL = 6 * 1024 * 1024 * 1024
 MANIFEST_LIMIT = 16 * 1024 * 1024
@@ -183,7 +183,7 @@ def read_archive(path):
         manifest = json.loads(z.read('manifest.json'))
         if not isinstance(manifest, dict):
             raise ValueError('无效归档清单')
-        native = {'agent-dash-codex': 'codex', 'agent-dash-pi': 'pi', 'agent-dash-dsh': 'dsh', 'agent-dash-hermes': 'hermes'}
+        native = {'agent-dash-codex': 'codex', 'agent-dash-pi': 'pi', 'agent-dash-dsh': 'dsh', 'agent-dash-hermes': 'hermes', 'agent-dash-agy': 'agy'}
         if manifest.get('format') in native and manifest.get('version') == 1:
             if Path(path).stat().st_size > LIMIT:
                 raise ValueError('子包超过大小限制')

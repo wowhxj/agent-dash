@@ -8,7 +8,7 @@
 ;;; Commentary:
 
 ;; Single package bundling native chat clients for Pi, Claude Code, DSH,
-;; Codex and Hermes with a cross-agent session hub.  See README.md.
+;; Codex, Hermes and Antigravity with a cross-agent session hub.  See README.md.
 
 ;;; Code:
 
@@ -19,6 +19,7 @@
 (require 'agent-dash-dsh)
 (require 'agent-dash-codex)
 (require 'agent-dash-hermes)
+(require 'agent-dash-agy)
 (require 'agent-dash-hub)
 (require 'agent-dash-search)
 

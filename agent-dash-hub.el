@@ -37,7 +37,7 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
 
 (defconst agent-dash-hub--agents
   '((claude "Claude Code" "C") (codex "Codex" "x") (pi "pi" "p")
-    (dsh "dsh" "d") (hermes "Hermes" "m"))
+    (dsh "dsh" "d") (hermes "Hermes" "m") (agy "Antigravity" "y"))
   "Backend, menu label and shortcut key, in menu order.")
 
 (defconst agent-dash-hub--convert-file
@@ -61,11 +61,18 @@ Sessions recorded under OLD are shown and opened from NEW.  Set with
 (defvar agent-dash-dsh--host)
 (declare-function agent-dash-dsh--login "agent-dash-dsh")
 (declare-function agent-dash-dsh--call "agent-dash-dsh" (method args &optional retried))
-(defconst agent-dash-hub--convert-sources '(claude codex))
+(defconst agent-dash-hub--agy-convert-file
+  (expand-file-name "agent-dash-agy-convert.mjs"
+                    (file-name-directory agent-dash-hub--convert-file)))
+
+(defconst agent-dash-hub--convert-sources '(claude codex agy))
+(defvar agent-dash-agy-directory)
+(declare-function agent-dash-agy--executable "agent-dash-agy")
 (defvar agent-dash-pi-sessions-directory)
 (defvar agent-dash-claude-config-directory)
 (declare-function agent-dash-holder-dir "agent-dash-holder")
 (declare-function agent-dash-holder-alive-p "agent-dash-holder")
+(declare-function agent-dash-holder-find "agent-dash-holder")
 
 (defconst agent-dash--reference-regexp
   "@\\[[^]\n]*\\](agent-dash:\\([a-z]+\\):\\([^)\n]+\\))"
@@ -938,25 +945,31 @@ Candidates keep the list order and show the table header as their group."
         (backend (plist-get row :backend)))
     (unless (memq backend agent-dash-hub--convert-sources)
       (user-error "不支持从 %s 转换" backend))
-    (unless (and source (file-name-absolute-p source) (not (file-remote-p source))
-                 (file-regular-p source) (file-readable-p source))
-      (user-error "找不到可读的本地会话文件：%s" source))
     (unless (and root (file-name-absolute-p root) (not (file-remote-p root)))
       (user-error "缺少本地项目路径：%s" root))
-    (let ((migrate (and (eq backend 'claude) (not (eq destination 'export)))))
-      (when (and migrate
-                 (or (agent-dash-hub-live-p row)
-                     (agent-dash-holder-alive-p
-                      (agent-dash-holder-dir backend (plist-get row :id)))))
-        (user-error "%s 正在运行或已打开，请关闭后再迁移" (plist-get row :key)))
-      (append (list "node" (pcase destination
-                             ('dsh agent-dash-hub--dsh-migrate-file)
-                             ('export agent-dash-hub--dsh-export-file)
-                             (_ agent-dash-hub--convert-file))
-                    (symbol-name backend) (expand-file-name source) (plist-get row :id)
-                    (expand-file-name root) (expand-file-name agent-dash-pi-sessions-directory)
-                    (expand-file-name "conversion-archives" agent-dash-directory))
-              (when (and migrate (null destination)) '("--migrate-claude"))))))
+    (let ((paths (list (plist-get row :id) (expand-file-name root)
+                       (expand-file-name agent-dash-pi-sessions-directory)
+                       (expand-file-name "conversion-archives" agent-dash-directory))))
+      (if (eq backend 'agy)
+          (append (list "node" agent-dash-hub--agy-convert-file
+                        (symbol-name (or destination 'pi)) (agent-dash-agy--executable)
+                        (agent-dash-hub--backup-local agent-dash-agy-directory))
+                  paths)
+        (unless (and source (file-name-absolute-p source) (not (file-remote-p source))
+                     (file-regular-p source) (file-readable-p source))
+          (user-error "找不到可读的本地会话文件：%s" source))
+        (let ((migrate (and (eq backend 'claude) (not (eq destination 'export)))))
+          (when (and migrate
+                     (or (agent-dash-hub-live-p row)
+                         (agent-dash-holder-alive-p
+                          (agent-dash-holder-dir backend (plist-get row :id)))))
+            (user-error "%s 正在运行或已打开，请关闭后再迁移" (plist-get row :key)))
+          (append (list "node" (pcase destination
+                                 ('dsh agent-dash-hub--dsh-migrate-file)
+                                 ('export agent-dash-hub--dsh-export-file)
+                                 (_ agent-dash-hub--convert-file))
+                        (symbol-name backend) (expand-file-name source))
+                  paths (when (and migrate (null destination)) '("--migrate-claude"))))))))
 
 (defun agent-dash-hub--convert-result (text destination)
   "Decode converter output TEXT for DESTINATION into callback arguments."
@@ -1337,10 +1350,17 @@ Candidates keep the list order and show the table header as their group."
                          (funcall done (car result) (cdr result))))))
       (error (kill-buffer out) (kill-buffer err) (signal (car failure) (cdr failure))))))
 
+(defconst agent-dash-hub--backup-backends '(codex pi dsh hermes agy)
+  "Backends with native session backup support.")
+
+(defconst agent-dash-hub--backup-backend-names
+  (mapcar #'symbol-name agent-dash-hub--backup-backends)
+  "String keys used by the backup command.")
+
 (defun agent-dash-hub--backup-notices (result failure)
   "Return backend warnings and errors from RESULT, falling back to FAILURE."
   (let ((errors (agent-dash-jget result "errors")) lines)
-    (dolist (backend '("codex" "pi" "dsh" "hermes"))
+    (dolist (backend agent-dash-hub--backup-backend-names)
       (dolist (warning (agent-dash-jget result "backends" backend "warnings"))
         (push (format "%s 提示：%s" backend warning) lines)))
     (if (and (hash-table-p errors) (> (hash-table-count errors) 0))
@@ -1382,7 +1402,8 @@ Candidates keep the list order and show the table header as their group."
               ('codex agent-dash-codex-directory)
               ('pi agent-dash-pi-sessions-directory)
               ('dsh agent-dash-hub-dsh-backup-directory)
-              ('hermes agent-dash-hermes-directory)))))
+              ('hermes agent-dash-hermes-directory)
+              ('agy agent-dash-agy-directory)))))
    backends))
 
 (defun agent-dash-hub--backup-export-run (args rows done)
@@ -1408,7 +1429,11 @@ Candidates keep the list order and show the table header as their group."
   "Export SELECTED rows, or all loaded rows."
   (let* ((rows (agent-dash-hub--backup-rows selected))
          (unsupported (seq-remove
-                       (lambda (row) (memq (plist-get row :backend) '(codex pi dsh hermes))) rows)))
+                       (lambda (row)
+                         (let ((backend (plist-get row :backend)))
+                           (and (memq backend agent-dash-hub--backup-backends)
+                                (or (not (eq backend 'agy)) (plist-get row :file)))))
+                       rows)))
     (when unsupported
       (let ((counts (mapconcat (lambda (backend)
                                  (format "%s %d" backend
@@ -1449,16 +1474,22 @@ Candidates keep the list order and show the table header as their group."
   "Export all loaded sessions."
   (interactive) (agent-dash-hub--backup-export nil))
 
+(defun agent-dash-hub--backup-holder-live-p (backend id)
+  "Return whether BACKEND has a live holder for session ID."
+  (if (memq backend '(codex hermes agy))
+      (agent-dash-holder-find backend id)
+    (agent-dash-holder-alive-p (agent-dash-holder-dir backend id))))
+
 (defun agent-dash-hub--backup-active-ids ()
   "Return backend-qualified IDs known to be active."
   (let (ids)
-    (dolist (backend '(codex pi dsh hermes))
+    (dolist (backend agent-dash-hub--backup-backends)
       (dolist (row (plist-get (gethash backend agent-dash-hub--sources) :rows))
         (when (or (agent-dash-hub-live-p row)
-                  (agent-dash-holder-alive-p (agent-dash-holder-dir backend (plist-get row :id))))
+                  (agent-dash-hub--backup-holder-live-p backend (plist-get row :id)))
           (push (format "%s:%s" backend (plist-get row :id)) ids))))
     (dolist (session agent-dash--sessions)
-      (when (and (memq (agent-dash-session-backend session) '(codex pi dsh hermes))
+      (when (and (memq (agent-dash-session-backend session) agent-dash-hub--backup-backends)
                  (buffer-live-p (agent-dash-session-buffer session))
                  (not (eq (agent-dash-session-state session) 'dead))
                  (agent-dash-data session :sid))
@@ -1502,11 +1533,12 @@ Candidates keep the list order and show the table header as their group."
        (if error (message "读取备份失败：%s" error)
          (let ((backends (agent-dash-jget result "backends")))
            (if (and (listp backends) backends
-                    (seq-every-p (lambda (b) (member b '("codex" "pi" "dsh" "hermes"))) backends))
+                    (seq-every-p (lambda (b) (member b agent-dash-hub--backup-backend-names))
+                                 backends))
                (when (buffer-live-p hub)
                  (with-current-buffer hub
                    (agent-dash-hub--backup-preview file (mapcar #'intern backends)
-                                                    (agent-dash-jget result "project_dirs"))))
+                                                   (agent-dash-jget result "project_dirs"))))
              (message "读取备份失败：后端列表无效"))))))))
 
 (defun agent-dash-hub--backup-preview (file backends project-dirs)
@@ -1514,6 +1546,9 @@ Candidates keep the list order and show the table header as their group."
   (when (and (memq 'dsh backends)
              (not (yes-or-no-p "DSH 恢复期间必须停止目标 Host，确认已停止且不会重启? ")))
     (user-error "已取消 DSH 备份导入"))
+  (when (and (memq 'agy backends)
+             (not (yes-or-no-p "恢复 Antigravity 备份前，请关闭使用目标数据目录的 agy 会话。确认已关闭? ")))
+    (user-error "已取消 Antigravity 备份导入"))
   (let* ((homes (agent-dash-hub--backup-homes backends))
          (maps (agent-dash-hub--backup-maps project-dirs))
          (active (agent-dash-hub--backup-active-ids))
@@ -1539,9 +1574,10 @@ Candidates keep the list order and show the table header as their group."
                                   (seq-count (lambda (session)
                                                (equal action (agent-dash-jget session "action")))
                                              sessions))))
-                     (insert (format "新增 %d · 覆盖 %d · 相同跳过 %d · 使用中跳过 %d\n\n"
+                     (insert (format "新增 %d · 覆盖 %d · 相同跳过 %d · 使用中跳过 %d · 冲突 %d\n\n"
                                      (funcall count "create") (funcall count "overwrite")
-                                     (funcall count "skip") (funcall count "busy"))))
+                                     (funcall count "skip") (funcall count "busy")
+                                     (funcall count "conflict"))))
                    (let ((notices (agent-dash-hub--backup-notices result nil)))
                      (unless (string-empty-p notices) (insert notices "\n\n")))
                    (dolist (session sessions)
@@ -1549,20 +1585,22 @@ Candidates keep the list order and show the table header as their group."
                            (id (agent-dash-jget session "id"))
                            (action (agent-dash-jget session "action"))
                            (path (agent-dash-jget session "path")))
-                       (unless (and (member backend '("codex" "pi" "dsh" "hermes"))
+                       (unless (and (member backend agent-dash-hub--backup-backend-names)
                                     (stringp id) (stringp path)
-                                    (member action '("create" "overwrite" "skip" "busy")))
+                                    (member action '("create" "overwrite" "skip"
+                                                     "busy" "conflict")))
                          (error "备份预览条目不完整"))
                        (insert (format "%s  %s:%s  %s\n"
                                        (pcase action ("create" "新增") ("overwrite" "覆盖")
-                                              ("busy" "使用中跳过") (_ "相同跳过")) backend id path))))
+                                              ("busy" "使用中跳过") ("conflict" "冲突")
+                                              (_ "相同跳过")) backend id path))))
                    (special-mode)
                    (local-set-key (kbd "q") #'agent-dash-hub-close-view)))
                (display-buffer report)
                (when (or (not (seq-some (lambda (session)
-                                           (equal (agent-dash-jget session "action") "overwrite"))
-                                         sessions))
-                          (yes-or-no-p "覆盖前将保存回滚快照；确认按预览导入? "))
+                                          (equal (agent-dash-jget session "action") "overwrite"))
+                                        sessions))
+                         (yes-or-no-p "覆盖前将保存回滚快照；确认按预览导入? "))
                  (unless (equal active (agent-dash-hub--backup-active-ids))
                    (error "活动会话已改变，请重新预览"))
                  (dolist (session sessions)
@@ -1600,7 +1638,7 @@ Candidates keep the list order and show the table header as their group."
                             (unless (string-empty-p notices) (insert notices "\n")))
                           (when (member "dsh" (agent-dash-jget reply "affected_backends"))
                             (insert "DSH 维护完成后，请自行重新启动 Host，再回到 Hub 按 g 刷新。\n"))
-                          (dolist (backend '(codex pi dsh hermes))
+                          (dolist (backend agent-dash-hub--backup-backends)
                             (let* ((entry (agent-dash-jget reply "backends" (symbol-name backend)))
                                    (rollback (agent-dash-jget entry "rollback_path"))
                                    (archive (agent-dash-jget entry "rollback_archive_path")))
@@ -1615,14 +1653,15 @@ Candidates keep the list order and show the table header as their group."
                       (display-buffer report))
                     (when (buffer-live-p hub)
                       (dolist (backend (agent-dash-jget reply "affected_backends"))
-                        (when (member backend '("codex" "pi" "hermes"))
+                        (when (and (member backend agent-dash-hub--backup-backend-names)
+                                   (not (equal backend "dsh")))
                           (agent-dash-hub--reload-after-conversion (intern backend)))))
                     (message "备份导入%s" (if failure "未全部完成，详见备份预览" "完成"))))))
            (error (message "备份导入已停止：%s" (error-message-string problem)))))))
     (message "正在后台预览备份…")))
 
 (defun agent-dash-hub-convert-project ()
-  "Convert all loaded Claude and Codex sessions in the project at point."
+  "Convert loaded sessions of supported backends in the project at point."
   (interactive)
   (let ((root (or (get-text-property (point) 'agent-dash-project-root)
                   (plist-get (agent-dash-hub--row-at-point) :root)
@@ -1824,7 +1863,10 @@ Candidates keep the list order and show the table header as their group."
 
 (defun agent-dash-hub--details-metadata ()
   "Return the full metadata text of the details row."
-  (let* ((row agent-dash-hub--details-row) (entry (agent-dash-summary-entry row)))
+  (let* ((row agent-dash-hub--details-row) (entry (agent-dash-summary-entry row))
+         (users (and (listp agent-dash-hub--details-turns)
+                     (seq-filter (lambda (turn) (eq (car turn) 'user))
+                                 agent-dash-hub--details-turns))))
     (concat (format "Agent: %s\nSession ID: %s\nProject: %s\nStorage path: %s\n"
                     (plist-get row :backend) (plist-get row :id)
                     (or (plist-get row :root) "unknown")
@@ -1839,7 +1881,9 @@ Candidates keep the list order and show the table header as their group."
                       "unknown"))
             (when (plist-get entry :error) (format "Summary error: %s\n" (plist-get entry :error)))
             (format "\nFirst user message:\n%s\n\nLast user message:\n%s\n\n"
-                    (agent-dash-hub--first-text row) (agent-dash-hub--last-text row)))))
+                    (or (plist-get row :first) (cdar users) (agent-dash-hub--first-text row))
+                    (or (plist-get row :last) (cdr (car (last users)))
+                        (agent-dash-hub--last-text row))))))
 
 (defun agent-dash-hub--details-render (&optional width)
   "Draw the details buffer at WIDTH from cached data, without rereading."
@@ -2004,7 +2048,9 @@ whole original conversation."
     ("d" (lambda () (agent-dash-hub--agent-label "dsh" "d"))
      (lambda () (interactive) (agent-dash-hub--new 'dsh)))
     ("m" (lambda () (agent-dash-hub--agent-label "Hermes" "m"))
-     (lambda () (interactive) (agent-dash-hub--new 'hermes)))]
+     (lambda () (interactive) (agent-dash-hub--new 'hermes)))
+    ("y" (lambda () (agent-dash-hub--agent-label "Antigravity" "y"))
+     (lambda () (interactive) (agent-dash-hub--new 'agy)))]
    ["其他"
     ("q" "关闭 / 返回" transient-quit-one :transient nil)]])
 
@@ -2021,7 +2067,9 @@ whole original conversation."
                 ("d" (lambda () (agent-dash-hub--agent-label "dsh" "d"))
                  (lambda () (interactive) (agent-dash-hub-filter-agent-to 'dsh)))
                 ("m" (lambda () (agent-dash-hub--agent-label "Hermes" "m"))
-                 (lambda () (interactive) (agent-dash-hub-filter-agent-to 'hermes)))])
+                 (lambda () (interactive) (agent-dash-hub-filter-agent-to 'hermes)))
+                ("y" (lambda () (agent-dash-hub--agent-label "Antigravity" "y"))
+                 (lambda () (interactive) (agent-dash-hub-filter-agent-to 'agy)))])
 
 (transient-define-prefix agent-dash-hub-filter-agent ()
   "Filter agents; changes apply immediately."
@@ -2056,10 +2104,10 @@ whole original conversation."
   "Choose the scope of a native session conversion."
   :display-action agent-dash-hub--display
   [[:description (lambda () (agent-dash-hub--describe 'convert))
-                 ("s" "转到 Pi（Claude 原件迁出并归档）" agent-dash-hub-convert-session)
+                 ("s" "转到 Pi（Claude 原件验证后迁出）" agent-dash-hub-convert-session)
                  ("d" "导入 DSH（Claude 原件验证后迁出）" agent-dash-hub-import-dsh)
                  ("e" "仅导出 DSH 包" agent-dash-hub-export-dsh)]
-   ["批量转到 Pi（Claude 原件迁出并归档）"
+   ["批量转到 Pi（Claude 原件验证后迁出）"
     ("p" "当前项目的全部已加载会话" agent-dash-hub-convert-project)
     ("b" "指定后端的全部已加载会话" agent-dash-hub-convert-backend)]
    ["返回"
@@ -2158,7 +2206,7 @@ whole original conversation."
 (define-derived-mode agent-dash-hub-mode special-mode "Agent-Hub"
   "Saved sessions of every agent.
 
-N 新建（C/x/p/d/m 选择 Agent，再选目录）；RET 打开/恢复；n/p 移动；j 定位会话。
+N 新建（C/x/p/d/m/y 选择 Agent，再选目录）；RET 打开/恢复；n/p 移动；j 定位会话。
 f 会话视图菜单；a Agent 筛选；P 项目筛选；l 仅存活；f h 显示不摘要会话；
 t 时间倒序/项目分组；f g 按 Agent 分组；c 恢复默认；g 刷新。
 TAB 折叠/展开当前分组；Shift-TAB 全部折叠/展开。

@@ -13,7 +13,7 @@ const run = promisify(execFile);
 const converter = fileURLToPath(new URL('../agent-dash-convert.mjs', import.meta.url));
 const cli = process.env.AGENT_DASH_TEST_PI;
 
-for (const backend of ['claude', 'codex']) {
+for (const backend of ['claude', 'codex', 'agy']) {
   test(`installed Pi resumes a converted ${backend} conversation twice`, { skip: !cli }, t => resume(t, backend));
 }
 
@@ -70,6 +70,15 @@ async function resume(t, backend) {
     const records = [{ type: 'session_meta', timestamp, payload: { id: sourceId, cwd: home, timestamp } },
       ...payloads.map(payload => ({ type: 'response_item', timestamp, payload }))];
     await writeFile(source, records.map(record => JSON.stringify(record)).join('\n') + '\n');
+  } else if (backend === 'agy') {
+    const timestamp = '2026-01-01T00:00:00.000Z';
+    const update = value => ({ method: 'session/update', params: { sessionId: sourceId, update: value } });
+    const message = (sessionUpdate, text) => update({ sessionUpdate, content: { type: 'text', text } });
+    const records = [{ type: 'agy_session', sessionId: sourceId, timestamp, model: 'gemini-test' },
+      message('user_message_chunk', 'Inspect the test output'),
+      update({ sessionUpdate: 'tool_call', toolCallId: 'run01', name: 'read', rawOutput: 'fixture exit status 1' }),
+      message('agent_message_chunk', 'The file was absent.')];
+    await writeFile(source, records.map(record => JSON.stringify(record)).join('\n') + '\n');
   } else {
     await writeFile(source, lines.join('\n') + '\n');
   }
@@ -86,13 +95,13 @@ async function resume(t, backend) {
   }
   assert.equal(requests.length, 2);
   const history = requests[1].messages;
-  for (const [role, text] of [['user', 'Inspect the test output'], ['tool', 'fixture exit status 1'],
+  for (const [role, text] of [['user', 'Inspect the test output'], [backend === 'agy' ? 'assistant' : 'tool', 'fixture exit status 1'],
     ['assistant', 'The file was absent.'], ['user', 'Continue the inspection'],
     ['assistant', 'Local reply 1'], ['user', 'What happened next?']]) {
     assert.ok(history.some(m => m.role === role && JSON.stringify(m.content).includes(text)), text);
   }
   const call = history.flatMap(m => m.tool_calls || []).find(c => c.function.name === (backend === 'claude' ? 'Bash' : 'exec_command'));
-  assert.ok(call && history.some(m => m.role === 'tool' && m.tool_call_id === call.id));
+  if (backend !== 'agy') assert.ok(call && history.some(m => m.role === 'tool' && m.tool_call_id === call.id));
   const continued = await readFile(file, 'utf8');
   const repeated = await run(process.execPath, args);
   assert.equal(JSON.parse(repeated.stdout).file, file);

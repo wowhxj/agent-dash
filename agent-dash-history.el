@@ -31,6 +31,7 @@
                          agent-dash-claude-config-directory
                          agent-dash-codex-executable agent-dash-codex-directory
                          agent-dash-hermes-executable agent-dash-hermes-directory
+                         agent-dash-agy-executable agent-dash-agy-directory
                          agent-dash-dsh-executable agent-dash-dsh-connection
                          agent-dash-dsh-bridge-file
                          agent-dash-dsh-max-messages agent-dash-dsh--host)

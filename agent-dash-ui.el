@@ -103,7 +103,10 @@ The prompt history keeps the text as typed.")
 
 (defun agent-dash--backend-name (backend)
   "Return the display name of BACKEND."
-  (if (eq backend 'dsh) "DSH" (capitalize (symbol-name backend))))
+  (pcase backend
+    ('dsh "DSH")
+    ('agy "Antigravity")
+    (_ (capitalize (symbol-name backend)))))
 
 (defun agent-dash--label (session)
   "Return the assistant label of SESSION."

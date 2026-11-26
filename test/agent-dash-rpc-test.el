@@ -1,4 +1,4 @@
-;;; agent-dash-rpc-test.el --- Codex and Hermes backend tests -*- lexical-binding: t; -*-
+;;; agent-dash-rpc-test.el --- JSON-RPC backend tests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -84,7 +84,7 @@
   (agent-dash-rpc-test-capture
    (let ((s (agent-dash-session-create 'hermes "/tmp")))
      (agent-dash-rpc-test-feed
-      #'agent-dash-hermes--record s
+      #'agent-dash-acp-record s
       "{\"id\":\"x\",\"result\":{\"sessionId\":\"H1\"}}"
       "{\"type\":\"agent_dash_user\",\"id\":\"p1\",\"text\":\"hi\"}"
       "{\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hm\"}}}}"
@@ -95,7 +95,7 @@
       "{\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Done\"}}}}")
      (should (equal (agent-dash-data s :sid) "H1"))
      (should (eq (agent-dash-session-state s) 'running))
-     (agent-dash-rpc-test-feed #'agent-dash-hermes--record s
+     (agent-dash-rpc-test-feed #'agent-dash-acp-record s
                                "{\"id\":\"y\",\"result\":{\"stopReason\":\"end_turn\"}}")
      (should (eq (agent-dash-session-state s) 'idle))
      (should (equal (mapcar (lambda (i) (list (plist-get i :id) (plist-get i :text)))
@@ -109,7 +109,7 @@
   (agent-dash-rpc-test-capture
    (let ((s (agent-dash-session-create 'hermes "/tmp")))
      (agent-dash-rpc-test-feed
-      #'agent-dash-hermes--record s
+      #'agent-dash-acp-record s
       "{\"id\":5,\"method\":\"session/request_permission\",\"params\":{\"toolCall\":{\"title\":\"rm x\"},\"options\":[{\"optionId\":\"o1\",\"kind\":\"allow_once\"},{\"optionId\":\"o2\",\"kind\":\"reject_once\"}]}}"
       "{\"id\":6,\"method\":\"fs/read_text_file\",\"params\":{}}")
      (should (equal (plist-get (car written) :error)
@@ -119,6 +119,44 @@
        (agent-dash-backend-respond 'hermes s request 'allow)
        (should (equal (plist-get (car written) :result)
                       '(:outcome (:outcome "selected" :optionId "o1"))))))))
+
+(ert-deftest agent-dash-agy-test-model-config ()
+  (agent-dash-rpc-test-capture
+   (let ((s (agent-dash-session-create 'agy "/tmp")))
+     (agent-dash-rpc-test-feed
+      #'agent-dash-acp-record s
+      (concat "{\"id\":\"x\",\"result\":{\"sessionId\":\"A1\",\"configOptions\":["
+              "{\"id\":\"model\",\"category\":\"model\",\"currentValue\":\"a\","
+              "\"options\":[{\"value\":\"a\"},{\"value\":\"b\"}]}]}}"))
+     (should (equal (agent-dash-backend-models 'agy s) '("a" "b")))
+     (should (equal (plist-get (agent-dash-session-meta s) :model) "a"))
+     (agent-dash-backend-set-model 'agy s "b")
+     (should (equal (plist-get (car written) :method) "session/set_config_option"))
+     (should (equal (plist-get (car written) :params)
+                    '(:sessionId "A1" :configId "model" :value "b")))
+     (agent-dash-rpc-test-feed
+      #'agent-dash-acp-record s
+      (concat "{\"method\":\"session/update\",\"params\":{\"update\":{"
+              "\"sessionUpdate\":\"config_option_update\",\"configOptions\":["
+              "{\"id\":\"model\",\"category\":\"model\",\"currentValue\":\"b\"}]}}}"))
+     (should (equal (plist-get (agent-dash-session-meta s) :model) "b")))))
+
+(ert-deftest agent-dash-agy-test-thinking-and-context ()
+  (agent-dash-rpc-test-capture
+   (let ((s (agent-dash-session-create 'agy "/tmp")))
+     (agent-dash-rpc-test-feed
+      #'agent-dash-acp-record s
+      (concat "{\"id\":\"x\",\"result\":{\"sessionId\":\"a\",\"configOptions\":["
+              "{\"id\":\"thought_level\",\"category\":\"thought_level\",\"currentValue\":\"low\","
+              "\"options\":[{\"value\":\"low\"},{\"value\":\"high\"}]}]}}")
+      (concat "{\"method\":\"session/update\",\"params\":{\"update\":{"
+              "\"sessionUpdate\":\"usage_update\",\"used\":50,\"size\":200}}}"))
+     (should (equal (plist-get (agent-dash-session-meta s) :thinking) "low"))
+     (should (equal (agent-dash--stat-segments s) '("50/200 (25%)")))
+     (agent-dash-agy-set-thinking s "high")
+     (should (equal (plist-get (car written) :params)
+                    '(:sessionId "a" :configId "thought_level" :value "high")))
+     (should-error (agent-dash-agy-set-thinking s "invalid") :type 'user-error))))
 
 (provide 'agent-dash-rpc-test)
 ;;; agent-dash-rpc-test.el ends here

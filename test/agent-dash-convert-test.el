@@ -12,17 +12,18 @@
   (let* ((a '(:backend claude :root "/project" :id "a"))
          (b '(:backend codex :root "/project" :id "b"))
          (c '(:backend claude :root "/elsewhere" :id "c"))
-         (rows (list a b c '(:backend pi :root "/project" :id "p"))))
+         (g '(:backend agy :root "/project" :id "g"))
+         (rows (list a b c g '(:backend pi :root "/project" :id "p"))))
     (cl-letf (((symbol-function 'agent-dash-hub--all) (lambda () rows))
               ((symbol-function 'agent-dash-hub--convert-rows) #'identity))
       (with-temp-buffer
         (insert (propertize "heading" 'agent-dash-project-root "/project") "\n"
                 (propertize "session" 'agent-dash-row a))
         (goto-char (point-min))
-        (should (equal (agent-dash-hub-convert-project) (list a b)))
+        (should (equal (agent-dash-hub-convert-project) (list a b g)))
         (forward-line)
         (should (equal (agent-dash-hub-convert-session) (list a)))
-        (should (equal (agent-dash-hub-convert-project) (list a b)))
+        (should (equal (agent-dash-hub-convert-project) (list a b g)))
         (should (equal (agent-dash-hub-convert-backend 'claude) (list a c)))))
     (should (eq (lookup-key agent-dash-hub-mode-map "v") #'agent-dash-hub-convert-menu))
     (dolist (key-command '(("d" . agent-dash-hub-import-dsh) ("e" . agent-dash-hub-export-dsh)))
@@ -47,6 +48,18 @@
            (agent-dash-hub--convert-command (plist-put (copy-sequence row) :backend 'pi))
            :type 'user-error))
       (delete-file source))))
+
+(ert-deftest agent-dash-convert-hub-agy-command ()
+  (let ((agent-dash-agy-directory "/agy profile/")
+        (agent-dash-pi-sessions-directory "/pi")
+        (agent-dash-directory "/state")
+        (row '(:backend agy :id "session" :root "/new project")))
+    (cl-letf (((symbol-function 'agent-dash-agy--executable) (lambda () "/cli bin/agy")))
+      (dolist (destination '(nil dsh export))
+        (should (equal (agent-dash-hub--convert-command row destination)
+                       (list "node" agent-dash-hub--agy-convert-file
+                             (symbol-name (or destination 'pi)) "/cli bin/agy" "/agy profile/"
+                             "session" "/new project" "/pi" "/state/conversion-archives")))))))
 
 (ert-deftest agent-dash-convert-hub-continues-after-error ()
   (let ((deadline (+ (float-time) 10)) refreshed report)

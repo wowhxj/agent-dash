@@ -199,7 +199,7 @@
   (dolist (record '((agent-dash-pi--record . "{\"type\":\"agent_settled\"}")
                     (agent-dash-claude--record . "{\"type\":\"result\",\"uuid\":\"r\",\"is_error\":true}")
                     (agent-dash-codex--record . "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"failed\"}}}")
-                    (agent-dash-hermes--record . "{\"error\":{\"message\":\"failed\"}}")
+                    (agent-dash-acp-record . "{\"error\":{\"message\":\"failed\"}}")
                     (agent-dash-dsh--event . "{\"seq\":1,\"type\":\"turn/end\",\"data\":{\"reason\":{\"kind\":\"failed\",\"error\":{\"message\":\"failed\"}}}}")))
     (agent-dash-notify-test-with-session
      (agent-dash-set-data session :queue-pi-stop "error")

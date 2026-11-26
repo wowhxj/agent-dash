@@ -2,11 +2,11 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Native Emacs chats for **Pi, Claude Code, Codex, DeepSeek Harness (DSH) and Hermes**, with one Hub for browsing and resuming saved sessions. All backends are included; install only the agent CLIs you use.
+Native Emacs chats for **Pi, Claude Code, Codex, DeepSeek Harness (DSH), Hermes and Google Antigravity (`agy`)**, with one Hub for browsing and resuming saved sessions. All backends are included; install only the agent CLIs you use.
 
 ## Install
 
-Requires Emacs 29.1+, macOS or GNU/Linux, and `markdown-mode`, `websocket` and `transient` (0.7+). Install and authenticate your agent CLIs, and make sure Emacs can find them in `exec-path`. Codex and Hermes history browsing also requires `sqlite3`.
+Requires Emacs 29.1+, macOS or GNU/Linux, and `markdown-mode`, `websocket` and `transient` (0.7+). Install and authenticate your agent CLIs, and make sure Emacs can find them in `exec-path`. Codex and Hermes history browsing also requires `sqlite3`. For Antigravity, sign in to a CLI version that supports `agy acp` (tested with 1.5.18). Select `agy` in `M-x agent-dash`, or press `N y` in the Hub.
 
 With a `use-package` version that supports `:vc`:
 
@@ -28,7 +28,7 @@ Alternatively, add a checkout to `load-path` and `(require 'agent-dash)`. Keep t
 - `M-x agent-dash`: choose an agent and working directory.
 - `M-x agent-dash-hub`: browse saved sessions across agents. Press `RET` to open or resume one, or `N` to create a session.
 
-Chats run in the background and can survive closing their buffer or Emacs. `C-c C-q` asks before stopping Pi, Claude, Codex or Hermes; for DSH it only detaches, leaving the Host session running. If a connection is lost, reopen the session from the Hub.
+Chats run in the background and can survive closing their buffer or Emacs. `C-c C-q` asks before stopping Pi, Claude, Codex, Hermes or Antigravity; for DSH it only detaches, leaving the Host session running. If a connection is lost, reopen the session from the Hub.
 
 ## Chat
 
@@ -47,7 +47,7 @@ Chats run in the background and can survive closing their buffer or Emacs. `C-c 
 | `C-c C-a` | Answer a pending request |
 | `C-c C-q` | Stop or detach |
 
-Use `M-x agent-dash-select-model` to change models where supported. `@` references insert saved user/assistant dialogue into the outgoing message. `/` completion shows available backend commands; Pi also supports native login, logout and reload without sending those operations to the model.
+Use `M-x agent-dash-select-model` to change models where supported. In Antigravity chats, use `/model` and `/thinking` to select a model and reasoning level. `@` references insert saved user/assistant dialogue into the outgoing message. `/` completion shows available backend commands; Pi also supports native login, logout and reload without sending those operations to the model.
 
 During a run, normal sends enter the local follow-up queue. Queued drafts can be reviewed, reordered, edited or deleted before delivery; delivered messages cannot be withdrawn. During a DSH run, `C-c C-s` submits a steer directly. Pressing `s` on a queued item also submits it as steering. Pausing the queue stages steering locally. To deliver a staged steer manually, select it during a run and press `x`. **Queues are not persisted across Emacs restarts.**
 
@@ -55,7 +55,7 @@ Images support PNG, JPEG, GIF and WebP. File attachment works without a clipboar
 
 ## Session Hub
 
-The summary column shows an AI summary when available, otherwise the first user message. The latest user message is shown separately. Press `g` to refresh after new activity.
+The summary column shows an AI summary when available, otherwise the first user message. The latest user message is shown separately. Press `g` to refresh after new activity. Use `a y` to filter for Antigravity. Its first and last user messages are loaded from history in the background, including sessions whose original project directory is missing.
 
 | Key | Action |
 |---|---|
@@ -80,11 +80,11 @@ For example, press `a C` to filter for Claude Code, `q` to return to the list, t
 
 Empty, subagent, archived and other non-summarized sessions are hidden by default; use `f h` to include them. Deleting history does not stop a running agent. For moved or missing project directories, use `D` to select a replacement; saved transcripts are not rewritten.
 
-## Continue Claude Code or Codex history in Pi or DSH
+## Continue Claude Code, Codex or Antigravity history in Pi or DSH
 
-In the Hub, place the cursor on a Claude Code or Codex session and press `v s` for the selection (or the session at point when the selection is empty), `v p` for loaded Claude and Codex sessions in the current project, or `v b` to convert all loaded sessions from one backend. The converter uses Node.js to read a local Claude project JSONL file or Codex rollout. It needs no source account or model request. The Hub shows the Pi session for the converted history. Press `RET` to continue with the model configured in Pi. Original transcripts are archived together under `conversion-archives/` in `agent-dash-directory`. When migrating Claude history to Pi from the Hub, the converter verifies the archive and the Pi session before removing the source JSONL from the Claude project directory. The converter uses `lsof` to check for writers. An active writer or an unavailable check leaves the source in place, and the report explains why. To restore it in Claude, copy the archive back into its original project session directory under the original Claude session ID with the `.jsonl` extension. Codex conversion and DSH export retain their source files.
+In the Hub, place the cursor on a Claude Code, Codex or Antigravity session and press `v s` for the selection (or the session at point when the selection is empty), `v p` for loaded convertible sessions in the current project, or `v b` to convert all loaded sessions from one backend. The converter uses Node.js to read a local Claude project JSONL file or Codex rollout. It needs no source account or model request. The Hub shows the Pi session for the converted history. Press `RET` to continue with the model configured in Pi. Original transcripts are archived together under `conversion-archives/` in `agent-dash-directory`. When migrating Claude history to Pi from the Hub, the converter verifies the archive and the Pi session before removing the source JSONL from the Claude project directory. The converter uses `lsof` to check for writers. An active writer or an unavailable check leaves the source in place, and the report explains why. To restore it in Claude, copy the archive back into its original project session directory under the original Claude session ID with the `.jsonl` extension. Codex and Antigravity conversions retain their sources, as does DSH export.
 
-Converting the same source contents for the same target project again reuses the Pi session, including any turns you have added. Changed source contents create a separate snapshot. The batch report shows one row per session with its outcome, any failure reason and relevant limitations for resuming. Press `TAB` or `RET` on a row to expand or collapse the full IDs, paths and original diagnostics. The Claude importer follows the parent chain of the last conversation leaf. Earlier history outside that chain, including pre-compaction records and other branches, remains in the source archive. For compacted Codex history it restores a readable replacement checkpoint and applies subsequent records. If a rollback cannot be reconstructed, the report gives the archive path. Content already absent from the source cannot be recovered. The archive contains the complete source record and can include commands, tool outputs and private text. When moving to a new computer, take both the source archive and the Pi sessions.
+Converting the same source contents for the same target project again reuses the Pi session, including any turns you have added. Changed source contents create a separate snapshot. The batch report shows one row per session with its outcome, any failure reason and relevant limitations for resuming. Press `TAB` or `RET` on a row to expand or collapse the full IDs, paths and original diagnostics. The Claude importer follows the parent chain of the last conversation leaf. Earlier history outside that chain, including pre-compaction records and other branches, remains in the source archive. For compacted Codex history it restores a readable replacement checkpoint and applies subsequent records. If a rollback cannot be reconstructed, the report gives the archive path. Content already absent from the source cannot be recovered. The archive contains the original Claude or Codex transcript, or the Antigravity ACP replay. It can include commands, tool outputs and private text. When moving to a new computer, take both the source archive and the Pi sessions.
 
 If only the source file survives, or the Codex index is missing, run the converter directly from the checkout. Supply the native session ID recorded in the file, the target project directory, the Pi session directory and the archive directory. Both commands below retain the source file. To migrate a transcript out of its native Claude project directory, append `--migrate-claude` to the first command.
 
@@ -93,11 +93,13 @@ node agent-dash-convert.mjs claude "$SOURCE_JSONL" "$SESSION_ID" "$PROJECT" "$PI
 node agent-dash-dsh-export.mjs codex "$ROLLOUT" "$SESSION_ID" "$PROJECT" "$PI_SESSIONS" "$ARCHIVES"
 ```
 
-DSH export also requires `python3` to build the ZIP. Enable **DeepSeek chat import** under Plugins → More → Experimental plugins in DSH. Press `v d` in the Hub to import into the DSH workspace for the source project. After verifying the imported history, the report shows the native DSH session ID. Claude sources are retired after verification. Codex sources are retained. For transfer to another machine, press `v e` and upload the resulting ZIP in the destination DSH. Historical tool calls and results appear as attributed text; the original archive keeps the native records. Uploading the same ZIP manually twice creates two sessions.
+Antigravity conversion uses the signed-in `agy acp` client and archives the replay in the same directory. Pi preserves replayed dialogue, reasoning and user images, with tools rendered as historical text. ACP does not expose per-message timestamps or usage. A native backup preserves the underlying session database.
+
+DSH export also requires `python3` to build the ZIP. Enable **DeepSeek chat import** under Plugins → More → Experimental plugins in DSH. Press `v d` in the Hub to import into the DSH workspace for the source project. After verifying the imported history, the report shows the native DSH session ID. Claude sources are retired after verification. Codex and Antigravity sources are retained. For transfer to another machine, press `v e` and upload the resulting ZIP in the destination DSH. Historical tool calls and results appear as attributed text. The archive keeps the source records used for conversion. Uploading the same ZIP manually twice creates two sessions.
 
 ## Back up and restore sessions across computers
 
-In the Hub on the old computer, press `M` to select all sessions matching the current filters, including sessions inside folded groups. Press `B s` to export the selected Codex, Pi, DSH and Hermes sessions to one ZIP. Use `m` to select individual sessions. On the new computer, press `B i` and choose the ZIP. Existing project directories are used automatically. For each missing directory, press `c` to create it at its original path or `m` to choose an existing local directory.
+In the Hub on the old computer, press `M` to select all sessions matching the current filters, including sessions inside folded groups. Press `B s` to export the selected Codex, Pi, DSH, Hermes and Antigravity sessions to one ZIP. Use `m` to select individual sessions. On the new computer, press `B i` and choose the ZIP. Existing project directories are used automatically. For a missing project directory, press `c` to create it at its original path. For backends that support path remapping, press `m` to choose an existing local directory.
 
 Backups include existing Hub summaries for the sessions you export. Import restores them into the local summary cache and keeps a local summary when the session itself is identical. Older ZIPs can still be imported.
 
@@ -110,6 +112,8 @@ The preview identifies each session by backend and session ID. Sessions in diffe
 **Hermes.** Use the Hermes data directory configured by `agent-dash-hermes-directory` (defaults to `HERMES_HOME` or `~/.hermes`). Start Hermes once on the new machine to initialize its native database. The backup preserves session IDs, messages, system prompts and model usage. It includes related branches, creation receipts needed for native resume, and any per-session JSONL recovery files. Close clients using the destination session before overwriting it. The two databases need compatible table layouts.
 
 If the selection includes Claude sessions, the Hub shows how many and lets you cancel or proceed with the supported sessions.
+
+**Antigravity.** Backups include the native session database and its `brain` and annotation files. The default directory is `~/.gemini/antigravity-cli`. Set `agent-dash-agy-directory` to use another profile. Initialize the destination profile and stop the `agy` processes using it before restoring. Restore requires `lsof` and preserves session IDs and original project paths. Identical sessions are skipped. If the same ID has different contents, the Hub reports a conflict and keeps the destination session. Restart `agy` to index restored sessions, then press `g` in the Hub. Login state, `implicit` cache files and external project files are separate. Delete saved sessions from the native Antigravity interface.
 
 **Codex.** Initialize the native index on the destination machine by starting Codex once. Close other Codex processes using that data directory before confirming the import. Existing Codex-only ZIPs are still accepted by `B i`.
 

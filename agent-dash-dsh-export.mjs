@@ -45,7 +45,7 @@ function exportHistory(backend, source, sourceId, project, pi, archives) {
       [converter, backend, source, sourceId, project, join(temp, 'pi'), archiveRoot], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const entries = readFileSync(snapshot, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
     const origin = entries.find(e => e.customType === 'agent-dash-import').data;
-    const title = `${backend === 'claude' ? 'Claude Code' : 'Codex'} · ${sourceId}`;
+    const title = `${{ claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' }[backend]} · ${sourceId}`;
     const provenance = `[Source history: ${title}; SHA-256 ${origin.sha256}]`;
     const messages = [];
     const notes = new Set();

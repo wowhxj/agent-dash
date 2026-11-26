@@ -19,7 +19,7 @@ function runHelper(name, args, input) {
 export function migrate(args, credentials, importZip = (zip, cwd) =>
   runHelper('./agent-dash-dsh-import.mjs', [zip, cwd], credentials)) {
   const [backend, source, sourceId, cwd, piRoot, archiveRoot] = args;
-  if (args.length !== 6 || !['claude', 'codex'].includes(backend)) throw new Error('Expected native source and destination directories');
+  if (args.length !== 6 || !['claude', 'codex', 'agy'].includes(backend)) throw new Error('Expected native source and destination directories');
   if (backend === 'claude') validateMigrationPaths(source, sourceId, piRoot, archiveRoot);
   const fd = backend === 'claude' ? openRegular(source) : undefined;
   try {

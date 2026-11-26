@@ -406,7 +406,7 @@
      (cl-letf (((symbol-function 'agent-dash-holder-settle)
                 (lambda (_s record)
                   (funcall callback (agent-dash-jget record "result") nil) t)))
-       (agent-dash-hermes--record
+       (agent-dash-acp-record
         session
         (agent-dash-json-read "{\"id\":12,\"result\":{\"stopReason\":\"end_turn\"}}")))
      (should (eq (agent-dash-session-state session) 'idle))

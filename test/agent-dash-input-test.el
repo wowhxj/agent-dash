@@ -411,7 +411,7 @@
      claude (agent-dash-json-read
              "{\"type\":\"system\",\"subtype\":\"init\",\"slash_commands\":[\"review\"]}"))
     (should (assoc "review" (agent-dash-backend-commands 'claude claude)))
-    (agent-dash-hermes--update
+    (agent-dash-acp-update
      hermes (agent-dash-json-read
              (concat "{\"sessionUpdate\":\"available_commands_update\","
                      "\"availableCommands\":[{\"name\":\"review\"}]}")))

@@ -247,6 +247,81 @@ function codexEchoes(rows) {
   return echoes;
 }
 
+// ACP replays saved messages and only the tool fields exposed by the agent.
+function replayAgy(rows, id, emit, assistant, warn, note) {
+  const tools = new Map();
+  for (const row of rows) {
+    if (row.method !== 'session/update' || row.params?.sessionId !== id) continue;
+    const update = row.params.update;
+    if (!nonempty(update?.toolCallId)) continue;
+    const prior = tools.get(update.toolCallId) ?? {};
+    tools.set(update.toolCallId, { ...prior, ...update });
+  }
+  function content(block, role) {
+    if (block?.type === 'text' && typeof block.text === 'string') return [text(block.text)];
+    if (block?.type === 'image' && nonempty(block.data) && /^image\//.test(block.mimeType) && role !== 'assistant')
+      return [{ type: 'image', data: block.data, mimeType: block.mimeType }];
+    warn(`archived Antigravity content ${block?.type ?? '(missing type)'}`);
+    return [];
+  }
+  let pending = [], kind;
+  const flush = () => {
+    if (kind === 'user') emit('user', pending);
+    if (kind === 'assistant') assistant(pending);
+    pending = [];
+  };
+  const handled = new Set();
+  for (const row of rows) {
+    if (row.type === 'agy_session') continue;
+    if (row.method !== 'session/update' || row.params?.sessionId !== id)
+      throw new Error('Antigravity replay contains an unexpected session or record');
+    const u = row.params.update;
+    switch (u?.sessionUpdate) {
+      case 'user_message_chunk':
+      case 'agent_message_chunk':
+      case 'agent_thought_chunk': {
+        const role = u.sessionUpdate === 'user_message_chunk' ? 'user' : 'assistant';
+        if (role !== kind) { flush(); kind = role; }
+        const parts = u.sessionUpdate === 'agent_thought_chunk' && typeof u.content?.text === 'string'
+          ? [{ type: 'thinking', thinking: u.content.text }] : content(u.content, role);
+        for (const part of parts) {
+          const last = pending.at(-1);
+          const field = part.type === 'text' ? 'text' : part.type === 'thinking' ? 'thinking' : null;
+          if (field && last?.type === part.type) last[field] += part[field];
+          else pending.push(part);
+        }
+        break;
+      }
+      case 'tool_call':
+      case 'tool_call_update': {
+        flush(); kind = undefined;
+        if (handled.has(u.toolCallId)) break;
+        handled.add(u.toolCallId);
+        const tool = tools.get(u.toolCallId) ?? u;
+        // Saved Antigravity tool calls may omit results or formal tool arguments.
+        // Keep those in dialogue context without constructing incomplete Pi tool pairs.
+        const name = tool.name || tool.kind || 'tool';
+        const lines = [`[Antigravity tool: ${name}; ${tool.status || 'unknown'}]`, tool.title];
+        const input = tool.rawInput ?? tool.args;
+        if (input !== undefined) lines.push(JSON.stringify(input));
+        if (tool.rawOutput !== undefined) lines.push(JSON.stringify(tool.rawOutput));
+        const result = Array.isArray(tool.content) ? tool.content.flatMap(part =>
+          part?.type === 'content' ? content(part.content, 'toolResult') : []) : [];
+        assistant([text(lines.filter(Boolean).join('\n')), ...result.filter(part => part.type === 'text')]);
+        if (result.some(part => part.type === 'image')) warn('archived Antigravity tool image');
+        note('Antigravity tool history rendered as text');
+        break;
+      }
+      case 'available_commands_update': case 'session_info_update': case 'config_option_update':
+      case 'current_mode_update': case 'usage_update': case 'plan':
+        note(`archived Antigravity ${u.sessionUpdate}`);
+        break;
+      default: warn(`archived Antigravity update ${u?.sessionUpdate ?? '(missing type)'}`);
+    }
+  }
+  flush();
+}
+
 function requireCanonical(path) {
   if (realpathSync(path) !== path) throw new Error(`Unexpected path or symbolic link: ${path}`);
 }
@@ -311,7 +386,7 @@ export function retireClaude(source, initial, raw, archive, file, targetMatches,
 }
 
 function convert(backend, source, sourceId, cwd, piRoot, archiveRoot, pinnedFd) {
-  if (!['claude', 'codex'].includes(backend)) throw new Error('Expected claude or codex');
+  if (!['claude', 'codex', 'agy'].includes(backend)) throw new Error('Expected claude, codex or agy');
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(sourceId)) throw new Error('Invalid source session ID');
   const zipped = backend === 'codex' && source.endsWith('.jsonl.zst');
   if (!zipped && !source.endsWith('.jsonl')) throw new Error('Expected a native JSONL transcript');
@@ -329,7 +404,7 @@ function convert(backend, source, sourceId, cwd, piRoot, archiveRoot, pinnedFd) 
     let r;
     try { r = JSON.parse(line); } catch { warn('archived malformed JSONL line'); continue; }
     if (!object(r)) { warn('archived invalid JSONL record'); continue; }
-    const nativeId = backend === 'claude' ? r.sessionId : r.type === 'session_meta' ? r.payload?.id : undefined;
+    const nativeId = backend === 'claude' || r.type === 'agy_session' ? r.sessionId : r.type === 'session_meta' ? r.payload?.id : undefined;
     if (nativeId !== undefined) {
       if (nativeId !== sourceId) throw new Error('Native source session ID mismatch');
       identified = true;
@@ -337,10 +412,15 @@ function convert(backend, source, sourceId, cwd, piRoot, archiveRoot, pinnedFd) 
     rows.push(r);
   }
   if (!identified) throw new Error('Missing native source session ID');
+  const agyHeader = backend === 'agy' ? rows[0] : null;
+  if (backend === 'agy' && (agyHeader?.type !== 'agy_session' || agyHeader.sessionId !== sourceId))
+    throw new Error('Missing Antigravity replay header');
   const firstTime = rows.find(r => Number.isFinite(Date.parse(r.timestamp)))?.timestamp;
   let timestamp = firstTime ? Date.parse(firstTime) : 0;
   const start = new Date(timestamp).toISOString();
-  let model, provider = backend === 'claude' ? 'anthropic' : 'openai';
+  let model = agyHeader?.model;
+  let provider = { claude: 'anthropic', codex: 'openai', agy: 'google' }[backend];
+  const api = { claude: 'anthropic-messages', codex: 'openai-responses', agy: 'google-generative-ai' }[backend];
   const messages = [], missingTime = new Map();
   let unstampedRecord;
   function emit(role, content, extra = {}) {
@@ -353,7 +433,7 @@ function convert(backend, source, sourceId, cwd, piRoot, archiveRoot, pinnedFd) 
     if (!content.length) return;
     if (!native.model && !model) warn('missing assistant model');
     if (!native.usage) warn('missing assistant token usage (zero placeholder)');
-    emit('assistant', content, { api: backend === 'claude' ? 'anthropic-messages' : 'openai-responses',
+    emit('assistant', content, { api,
       provider, model: native.model || model || 'unknown', usage: usage(native.usage),
       stopReason: native.stop_reason === 'max_tokens' ? 'length' : 'stop' });
   }
@@ -369,10 +449,16 @@ function convert(backend, source, sourceId, cwd, piRoot, archiveRoot, pinnedFd) 
   if (backend === 'claude') {
     try { active = claudeBranch(rows, warn); }
     catch (error) { throw new Error(`${error.message}. Original archived at ${archive}`); }
-  } else {
+  } else if (backend === 'codex') {
     active = codexBranch(rows, warn, archive);
+  } else {
+    active = [];
   }
   const echoes = backend === 'codex' ? codexEchoes(active) : new Set();
+  if (backend === 'agy') {
+    warn('Antigravity replay does not expose per-message timestamps or token usage');
+    replayAgy(rows, sourceId, emit, assistant, warn, note);
+  }
   for (const r of active) {
     const time = Date.parse(r.timestamp);
     unstampedRecord = Number.isFinite(time) ? undefined : r;

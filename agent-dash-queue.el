@@ -289,7 +289,7 @@ Crossing stages a kind conversion and pauses delivery; it never sends."
               (agent-dash-backend-send backend session (plist-get entry :wire-text)
                                        (plist-get entry :images) mode)
               ;; These adapters provide a correlated protocol acknowledgement.
-              (unless (memq backend '(pi claude codex hermes))
+              (unless (memq backend '(pi claude codex hermes agy))
                 (agent-dash-delivery-result session id t)))
           (error (agent-dash-queue--fail session entry 'unknown))
           (quit (agent-dash-queue--fail session entry 'unknown)
