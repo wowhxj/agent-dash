@@ -68,11 +68,12 @@ The summary column shows an AI summary when available, otherwise the first user 
 | `f` / `a` / `P` | View filters / agent filter / project filter |
 | `l` / `c` | Toggle live-only view / reset filters |
 | `u` | Clear selection and any pending deletion on the current row and keep point there |
-| `m` / `M` / `U` | Toggle selection and advance / select all filtered sessions / clear selection |
+| `m` / `M` | Toggle selection and advance / select all filtered sessions |
+| `U` | Clear all selections and pending deletion marks, including marks outside the current filter |
 | `i` | View dialogue. In the details buffer, `m` toggles metadata and `C-c C-w` copies dialogue |
 | `s` | Semantic search using gptel |
 | `r` / `R` | Generate or update selected summary / retry failed summaries |
-| `d` / `u` / `x` | Mark / unmark / execute history deletion (Pi and Claude only) |
+| `d` / `x` | Mark sessions for deletion / confirm deletion (Pi and Claude only) |
 | `!` / `?` / `q` | Diagnostics / help / return |
 
 For example, press `a C` to filter for Claude Code, `q` to return to the list, then `M`. Use `v s` to convert the selection to Pi or `v d` to import it into the connected DSH Host. Use `v e` for a ZIP only. For deletion, `d` stages the selection and `x` confirms all staged deletions. Select-all includes loaded sessions in folded groups that pass the filters. Changing filters retains only selections that still match.

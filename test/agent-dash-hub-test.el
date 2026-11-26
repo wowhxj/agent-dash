@@ -603,6 +603,18 @@
    (agent-dash-hub--goto "claude:s2-bbbbbbbb")
    (should (equal (agent-dash-hub-test-conversion-keys "d") '("codex:s1-aaaaaaaa")))))
 
+(ert-deftest agent-dash-hub-test-unmark-all ()
+  (agent-dash-hub-test-with-cli-rows
+   (agent-dash-hub-test-press "a" "C")
+   (agent-dash-hub-test-press "M")
+   (puthash "claude:s1-aaaaaaaa" t agent-dash-hub--marks)
+   (puthash "codex:s1-aaaaaaaa" t agent-dash-hub--marks)
+   (agent-dash-hub-test-press "U")
+   (should (zerop (hash-table-count agent-dash-hub--marks)))
+   (should (zerop (hash-table-count (agent-dash-hub--selection))))
+   (should-not agent-dash-fake-calls)
+   (should-error (agent-dash-hub-test-press "x") :type 'user-error)))
+
 (ert-deftest agent-dash-hub-test-selection-delete-preflight-and-confirmation ()
   (agent-dash-hub-test-with-cli-rows
    (agent-dash-hub-test-press "a" "C")

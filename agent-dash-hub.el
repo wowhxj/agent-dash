@@ -1666,6 +1666,13 @@ Candidates keep the list order and show the table header as their group."
     (remhash key agent-dash-hub--marks))
   (agent-dash-hub--render))
 
+(defun agent-dash-hub-unmark-all ()
+  "Clear all selections and pending deletion marks in this Hub."
+  (interactive)
+  (clrhash agent-dash-hub--marks)
+  (agent-dash-hub-clear-selection)
+  (message "已清空选择和待删除标记"))
+
 (defun agent-dash-hub-execute-deletions ()
   "Permanently delete the marked sessions after confirmation."
   (interactive)
@@ -2099,9 +2106,9 @@ whole original conversation."
    ["管理"
     ("m" "切换选中并前进" agent-dash-hub-toggle-selection :transient t)
     ("M" "全选当前筛选（含折叠）" agent-dash-hub-select-all :transient t)
-    ("U" "清空选择" agent-dash-hub-clear-selection :transient t)
     ("d" "标记已选 / 当前行待删除" agent-dash-hub-mark-delete)
     ("u" "清除当前行的选择和待删标记" agent-dash-hub-unmark-delete)
+    ("U" "清空选择和待删除标记" agent-dash-hub-unmark-all)
     ("x" "确认删除" agent-dash-hub-execute-deletions)
     ("v" "转换会话" agent-dash-hub-convert-menu)
     ("B" "原生备份" agent-dash-hub-backup-menu)
@@ -2146,7 +2153,7 @@ whole original conversation."
 (define-key agent-dash-hub-mode-map (kbd "B") #'agent-dash-hub-backup-menu)
 (define-key agent-dash-hub-mode-map (kbd "m") #'agent-dash-hub-toggle-selection)
 (define-key agent-dash-hub-mode-map (kbd "M") #'agent-dash-hub-select-all)
-(define-key agent-dash-hub-mode-map (kbd "U") #'agent-dash-hub-clear-selection)
+(define-key agent-dash-hub-mode-map (kbd "U") #'agent-dash-hub-unmark-all)
 
 (define-derived-mode agent-dash-hub-mode special-mode "Agent-Hub"
   "Saved sessions of every agent.
@@ -2156,10 +2163,11 @@ f 会话视图菜单；a Agent 筛选；P 项目筛选；l 仅存活；f h 显�
 t 时间倒序/项目分组；f g 按 Agent 分组；c 恢复默认；g 刷新。
 TAB 折叠/展开当前分组；Shift-TAB 全部折叠/展开。
 i 详情/对话；s 语义搜索/问答；r 生成摘要；R 重试失败摘要（需 `agent-dash-summary-mode'）。
-m 切换选中并移到下一会话；M 全选当前筛选的已加载会话（含折叠）；U 清空选择。
+m 切换选中并移到下一会话；M 全选当前筛选的已加载会话（含折叠）。
 v s 转换到 Pi；v d 导出 DSH 包；均优先处理选集，空选集处理当前行。
 v p 转换当前项目；v b 转换指定后端；B Codex 备份菜单。
-d 标记已选会话或当前行待删除；u 清除当前行选择和删除标记；x 确认执行全部删除标记。
+d 标记已选会话或当前行待删除；x 确认删除。
+u 清除当前行选择和待删除标记；U 清空所有选择和待删除标记。
 D 项目目录重定向；! 诊断。
 w 复制 ID；W 复制项目；q 返回之前的 tab；? 命令菜单。
 列：*=已选，D=待删除，●=后台实例或已打开；日期 * 表示来源时间，不是消息时间。
