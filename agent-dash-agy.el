@@ -39,7 +39,7 @@
 
 (cl-defmethod agent-dash-backend-start ((_ (eql agy)) session &optional resume-id)
   "Start SESSION or reconnect to RESUME-ID."
-  (agent-dash-acp-start session (agent-dash-agy--command) resume-id))
+  (agent-dash-acp-start session (agent-dash-agy--command) resume-id #'agent-dash-agy--record))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql agy)) session text images _mode)
   "Send TEXT and IMAGES to SESSION."
@@ -120,6 +120,53 @@
                                   agent-dash-agy-directory)))
       (when (and (file-regular-p file) (not (file-symlink-p file))) file))))
 
+(defconst agent-dash-agy--images-reader
+  (expand-file-name "agent-dash-agy-images.py" (file-name-directory load-file-name))
+  "Reader for embedded images omitted by Antigravity's ACP replay.")
+
+(defun agent-dash-agy--native-prompts (id)
+  "Read the ordered native prompts and embedded images of ID, when available."
+  (when-let* ((file (agent-dash-agy--native-file id))
+              (python (executable-find "python3")))
+    (with-temp-buffer
+      (when (eq 0 (process-file python nil (list (current-buffer) nil) nil
+                                "-B" agent-dash-agy--images-reader file
+                                (number-to-string agent-dash-image-max-bytes)))
+        (agent-dash-json-read (buffer-string))))))
+
+(defun agent-dash-agy--restore-images (session id &optional allow-prefix)
+  "Attach native images to matching user messages of SESSION ID.
+With ALLOW-PREFIX, the holder might still be replaying later prompts."
+  (let ((users (seq-filter (lambda (item) (eq (plist-get item :type) 'user))
+                           (agent-dash-session-items session)))
+        (prompts (ignore-errors (agent-dash-agy--native-prompts id))))
+    (when allow-prefix
+      (setq prompts (seq-take prompts (length users))))
+    ;; Match in order so repeated prompts stay associated with their own images.
+    (when (equal (mapcar (lambda (item) (plist-get item :text)) users)
+                 (mapcar (lambda (prompt) (agent-dash-jget prompt "text")) prompts))
+      (cl-mapc
+       (lambda (item prompt)
+         (unless (plist-get item :images)
+           (let ((images
+                  (delq nil
+                        (mapcar (lambda (data)
+                                  (when-let* ((bytes (ignore-errors (base64-decode-string data)))
+                                              (mime (agent-dash-image--mime bytes)))
+                                    (list :mime-type mime :data data :name "image")))
+                                (agent-dash-jget prompt "images")))))
+             (when images
+               (agent-dash-emit session (list :type 'user :id (plist-get item :id)
+                                              :images images))))))
+       users prompts))))
+
+(defun agent-dash-agy--record (session record)
+  "Apply ACP RECORD to SESSION and supplement the completed history replay."
+  (agent-dash-acp-record session record)
+  (when-let* ((id (agent-dash-jget record "result" "sessionId")))
+    (when (agent-dash-session-items session)
+      (agent-dash-agy--restore-images session id agent-dash-replaying))))
+
 (defun agent-dash-agy--workspace (meta)
   "Return a local project directory from native metadata META."
   (let ((uris (ignore-errors (agent-dash-json-read (agent-dash-jget meta "workspace_uris")))))
@@ -198,6 +245,20 @@
                        (agent-dash-agy--sessions nil))))
     (unless row (user-error "No saved Antigravity session %s" id))
     (agent-dash-agy--transcript (agent-dash-agy--command) row)))
+
+(cl-defmethod agent-dash-backend-history-items ((_ (eql agy)) row)
+  "Replay saved Antigravity history for ROW as a timeline."
+  (let* ((root (plist-get row :root))
+         (cwd (if (and root (not (file-remote-p root)) (file-directory-p root))
+                  root temporary-file-directory))
+         (id (plist-get row :id))
+         (session (agent-dash-session-create 'agy cwd))
+         (agent-dash-event-functions nil)
+         (agent-dash-update-functions nil))
+    (unless (plist-get row :empty)
+      (agent-dash-acp-load-history session (agent-dash-agy--command) id cwd)
+      (agent-dash-agy--restore-images session id))
+    session))
 
 (provide 'agent-dash-agy)
 ;;; agent-dash-agy.el ends here

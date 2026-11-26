@@ -95,7 +95,7 @@ async function resume(t, backend) {
   }
   assert.equal(requests.length, 2);
   const history = requests[1].messages;
-  for (const [role, text] of [['user', 'Inspect the test output'], [backend === 'agy' ? 'assistant' : 'tool', 'fixture exit status 1'],
+  for (const [role, text] of [['user', 'Inspect the test output'], ...(backend === 'agy' ? [] : [['tool', 'fixture exit status 1']]),
     ['assistant', 'The file was absent.'], ['user', 'Continue the inspection'],
     ['assistant', 'Local reply 1'], ['user', 'What happened next?']]) {
     assert.ok(history.some(m => m.role === role && JSON.stringify(m.content).includes(text)), text);

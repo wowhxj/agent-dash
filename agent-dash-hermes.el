@@ -138,5 +138,20 @@ Read the native index when present; ACP listing alone omits CLI history."
                      (user-error "No saved Hermes session %s" id))))
       (agent-dash-acp-transcript (agent-dash-hermes--command) id (plist-get info :root)))))
 
+(cl-defmethod agent-dash-backend-history-items ((_ (eql hermes)) row)
+  "Read saved dialogue and images for ROW."
+  (let* ((root (plist-get row :root))
+         (cwd (if (and root (not (file-remote-p root)) (file-directory-p root))
+                  root temporary-file-directory))
+         (id (plist-get row :id))
+         (session (agent-dash-session-create 'hermes cwd)))
+    (if-let* ((index (agent-dash-hermes--index)))
+        (dolist (message (agent-dash-hermes--saved-messages index id))
+          (agent-dash-emit session (list :type (intern (plist-get message :role))
+                                         :text (plist-get message :text)
+                                         :images (plist-get message :images))))
+      (agent-dash-acp-load-history session (agent-dash-hermes--command) id cwd))
+    session))
+
 (provide 'agent-dash-hermes)
 ;;; agent-dash-hermes.el ends here

@@ -57,9 +57,10 @@
     (cl-letf (((symbol-function 'agent-dash-agy--executable) (lambda () "/cli bin/agy")))
       (dolist (destination '(nil dsh export))
         (should (equal (agent-dash-hub--convert-command row destination)
-                       (list "node" agent-dash-hub--agy-convert-file
-                             (symbol-name (or destination 'pi)) "/cli bin/agy" "/agy profile/"
-                             "session" "/new project" "/pi" "/state/conversion-archives")))))))
+                       (append (list "node" agent-dash-hub--agy-convert-file
+                                     (symbol-name (or destination 'pi)) "/cli bin/agy" "/agy profile/"
+                                     "session" "/new project" "/pi" "/state/conversion-archives")
+                               (unless (eq destination 'export) '("--move")))))))))
 
 (ert-deftest agent-dash-convert-hub-continues-after-error ()
   (let ((deadline (+ (float-time) 10)) refreshed report)

@@ -82,11 +82,11 @@
 
 ## 把 Claude Code、Codex 或 Antigravity 历史带到 Pi 或 DSH
 
-打开 Hub，将光标放在一条 Claude Code、Codex 或 Antigravity 会话上，按 `v s` 转换所选会话（未多选时转换光标所在的一条），`v p` 转换当前项目已加载的可转换会话，`v b` 按来源后端批量转换。转换器用 Node.js 在本机读取 Claude 项目中的 JSONL 或 Codex rollout，无需登录来源账号。转换后 Hub 以 Pi 会话显示这段历史，按 `RET` 即可继续。原始记录集中保存在 `agent-dash-directory` 下的 `conversion-archives/`。通过 Hub 把 Claude 会话迁到 Pi 时，程序会校验归档和 Pi 会话，然后移除 Claude 项目目录里的源 JSONL。迁出前使用 `lsof` 检查写入进程；检测到写入或无法完成检查时，保留源文件并在报告中注明原因。若要在 Claude 中恢复，把归档复制回原项目的会话目录，并以原 Claude 会话 ID 加 `.jsonl` 命名。Codex 和 Antigravity 转换会保留源会话。DSH 导出也会保留源会话。续聊使用你为 Pi 配置的模型。
+打开 Hub，将光标放在一条 Claude Code、Codex 或 Antigravity 会话上，按 `v s` 转换所选会话（未多选时转换光标所在的一条），`v p` 转换当前项目已加载的可转换会话，`v b` 按来源后端批量转换。转换器用 Node.js 在本机读取 Claude 项目中的 JSONL 或 Codex rollout，无需登录来源账号。转换后 Hub 以 Pi 会话显示这段历史，按 `RET` 即可继续。原始记录集中保存在 `agent-dash-directory` 下的 `conversion-archives/`。通过 Hub 把 Claude 会话迁到 Pi 时，程序会校验归档和 Pi 会话，然后移除 Claude 项目目录里的源 JSONL。迁出前使用 `lsof` 检查写入进程；检测到写入或无法完成检查时，保留源文件并在报告中注明原因。若要在 Claude 中恢复，把归档复制回原项目的会话目录，并以原 Claude 会话 ID 加 `.jsonl` 命名。Codex 转换和仅导出 DSH 包都会保留源会话。续聊使用你为 Pi 配置的模型。
 
 相同来源内容和目标项目重复转换会复用已有 Pi 会话，包括已经追加的新消息。来源内容更新后再转换，会产生单独的快照。批量报告默认每条会话占一行，显示迁移结果、失败原因和影响续聊的提示。在一行上按 `TAB` 或 `RET` 展开或收起完整 ID、目标文件、归档位置和原始诊断。Claude 转换沿最后一条对话的父记录链恢复当前上下文；压缩前历史和其他分支中未出现在这条链上的记录，仍可在原件归档中查看。Codex 有可读的压缩检查点时，从检查点恢复上下文并追加后续记录。遇到无法可靠还原的回滚，报告会给出归档路径。源文件中已经缺失的内容无法重建。归档保存 Claude 或 Codex 的原始记录，或 Antigravity 的 ACP 回放，可能包含工具输出、命令和私密内容；换机时请连同原件归档和 Pi 会话一起备份。
 
-Antigravity 转换会调用本机已登录的 `agy acp`，将回放记录保存在同一归档目录。Pi 保留 ACP 提供的对话、思考和用户图片，工具记录转为历史文本。ACP 未提供每条消息的时间、用量或未回放的原生字段。要保留原生会话数据库，请另做会话备份。
+Antigravity 转换会调用本机已登录的 `agy acp`，将回放记录保存在同一归档目录。Pi 保留 ACP 提供的对话、思考和用户图片。DSH 正文保留对话和一条用于校验导入的来源标记。工具记录和原始输出保留在回放归档。ACP 未提供每条消息的时间、用量或未回放的原生字段。转到 Pi 或 DSH 时，目标验证通过后会保存原生恢复 ZIP，再从 Antigravity 的会话列表移出原件。迁移前请关闭使用该数据目录的 `agy` 进程。数据目录正在使用、源会话有变化或校验失败时会保留原件。可用 `B i` 导入恢复 ZIP，按原会话 ID 恢复。
 
 如果只剩一份原始文件，或者 Codex 索引已经丢失，也能从检出的仓库直接运行转换器。下列参数依次为来源、源文件绝对路径、文件内记录的会话 ID、新机上的项目目录、Pi 会话目录和原件归档目录。下面的命令保留输入文件。从 Claude 原生项目目录迁出时，可在第一条命令末尾加 `--migrate-claude`。DSH 导出使用相同参数，第五项用于检查目录隔离。
 
@@ -95,7 +95,7 @@ node agent-dash-convert.mjs claude "$SOURCE_JSONL" "$SESSION_ID" "$PROJECT" "$PI
 node agent-dash-dsh-export.mjs codex "$ROLLOUT" "$SESSION_ID" "$PROJECT" "$PI_SESSIONS" "$ARCHIVES"
 ```
 
-要在 DSH 续聊，需要本机有 `python3` 来生成 ZIP。在 DSH 的「插件 → 更多 → 实验性插件」启用 **DeepSeek chat import**，然后在 Hub 按 `v d`。导入器在源项目对应的 DSH 工作区创建会话，回读历史并核对来源，成功后报告原生 DSH 会话 ID。Claude 原件在校验后迁出，Codex 和 Antigravity 原件保留。需要把 ZIP 带到另一台机器时，按 `v e`，再使用目标 DSH 的上传按钮手动导入。历史工具调用及结果以带来源标记的文本进入对话，归档保留转换使用的源记录。手动上传同一份 ZIP 会生成重复的 DSH 会话。
+要在 DSH 续聊，需要本机有 `python3` 来生成 ZIP。在 DSH 的「插件 → 更多 → 实验性插件」启用 **DeepSeek chat import**，然后在 Hub 按 `v d`。导入器在源项目对应的 DSH 工作区创建会话，回读历史并核对来源，成功后报告原生 DSH 会话 ID。Claude 和 Antigravity 原件在校验后迁出，Codex 原件保留。需要把 ZIP 带到另一台机器时，按 `v e`，再使用目标 DSH 的上传按钮手动导入。历史工具调用及结果以带来源标记的文本进入对话，归档保留转换使用的源记录。手动上传同一份 ZIP 会生成重复的 DSH 会话。
 
 ## 在两台电脑之间备份和恢复会话
 

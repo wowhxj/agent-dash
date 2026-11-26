@@ -698,8 +698,8 @@ Never kill a busy/unsaved session or launch before the old holder has exited."
        base (if id (concat "\\(?:\\`\\|_\\)" (regexp-quote id) "\\.jsonl\\'")
               "\\.jsonl\\'")))))
 
-(cl-defmethod agent-dash-backend-transcript ((_ (eql pi)) id)
-  "Pi `agent-dash-backend-transcript' for ID: the active branch only."
+(defun agent-dash-pi--dialogue (id &optional session)
+  "Read ID's active branch, populating SESSION with images when supplied."
   (let* ((file (or (agent-dash-pi--file id) (user-error "No saved Pi session %s" id)))
          (entries (mapcar #'agent-dash-json-read (agent-dash-file-lines file)))
          (by-id (make-hash-table :test #'equal))
@@ -711,11 +711,27 @@ Never kill a busy/unsaved session or launch before the old holder has exited."
       (let ((role (agent-dash-jget entry "message" "role")))
         (when (and (equal (agent-dash-jget entry "type") "message")
                    (member role '("user" "assistant")))
-          (let ((text (agent-dash-pi--blocks-text (agent-dash-jget entry "message" "content"))))
-            (unless (string-blank-p text)
-              (push (cons (intern role) text) turns)))))
+          (let* ((content (agent-dash-jget entry "message" "content"))
+                 (text (agent-dash-pi--blocks-text content)))
+            (if session
+                (push (list :type (intern role) :text text
+                            :images (agent-dash-images-from-blocks content (equal role "user")))
+                      turns)
+              (unless (string-blank-p text)
+                (push (cons (intern role) text) turns))))))
       (setq entry (gethash (agent-dash-jget entry "parentId") by-id)))
-    turns))
+    (if session
+        (dolist (turn turns session) (agent-dash-emit session turn))
+      turns)))
+
+(cl-defmethod agent-dash-backend-transcript ((_ (eql pi)) id)
+  "Read dialogue text for saved session ID."
+  (agent-dash-pi--dialogue id))
+
+(cl-defmethod agent-dash-backend-history-items ((_ (eql pi)) row)
+  "Read saved dialogue and images for ROW."
+  (let ((root (or (plist-get row :root) default-directory)))
+    (agent-dash-pi--dialogue (plist-get row :id) (agent-dash-session-create 'pi root))))
 
 (cl-defmethod agent-dash-backend-delete ((_ (eql pi)) session)
   "Pi `agent-dash-backend-delete' for SESSION."

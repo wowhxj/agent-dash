@@ -46,7 +46,7 @@ function exportHistory(backend, source, sourceId, project, pi, archives) {
     const entries = readFileSync(snapshot, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
     const origin = entries.find(e => e.customType === 'agent-dash-import').data;
     const title = `${{ claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' }[backend]} · ${sourceId}`;
-    const provenance = `[Source history: ${title}; SHA-256 ${origin.sha256}]`;
+    const provenance = `[Source history: ${title}${backend === 'agy' ? ' (dialogue v2)' : ''}; SHA-256 ${origin.sha256}]`;
     const messages = [];
     const notes = new Set();
     function append(role, time) {
@@ -56,6 +56,19 @@ function exportHistory(backend, source, sourceId, project, pi, archives) {
     }
     for (const { message: m, timestamp } of entries.filter(e => e.type === 'message')) {
       if (Date.parse(timestamp) < 0) throw new Error(`DSH requires a timestamp on or after the Unix epoch. Original archived at ${archive}`);
+      if (backend === 'agy') {
+        const dialogue = m.content.filter(block => block.type === 'text').map(block => block.text);
+        for (const block of m.content) if (block.type !== 'text')
+          notes.add(`Antigravity ${block.type} retained in the replay archive`);
+        if (!dialogue.length) continue;
+        const role = m.role === 'user' ? 'USER' : 'ASSISTANT';
+        if (role === 'ASSISTANT' && !messages.length) append('USER', timestamp);
+        let current = messages.at(-1);
+        if (role === 'USER' || current.role !== role) current = append(role, timestamp);
+        current.fragments.push({ type: role === 'USER' ? 'REQUEST' : 'RESPONSE',
+          content: (current.fragments.length ? '\n\n' : '') + dialogue.join('\n') });
+        continue;
+      }
       let current = messages.at(-1);
       if (m.role === 'user') current = append('USER', timestamp);
       else {
@@ -92,6 +105,7 @@ function exportHistory(backend, source, sourceId, project, pi, archives) {
       const type = current.role === 'USER' ? 'REQUEST' : 'RESPONSE';
       current.fragments.push({ type, content: (current.fragments.length ? '\n\n' : '') + lines.join('\n') });
     }
+    if (!messages.length) throw new Error(`No DSH-compatible dialogue; source archived at ${archive}`);
     messages[0].fragments.unshift({ type: 'REQUEST', content: provenance });
     if (messages.some((m, i) => m.role === 'USER' && messages[i + 1]?.role !== 'ASSISTANT'))
       notes.add('Source user turn without a reply imports with DSH no-reply status');

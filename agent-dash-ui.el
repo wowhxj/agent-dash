@@ -93,12 +93,22 @@ The prompt history keeps the text as typed.")
    (replace-regexp-in-string "[ \t\n]+" " " (string-trim (format "%s" (or text ""))))
    width nil nil "…"))
 
-(defun agent-dash--markdown (text)
-  "Return TEXT with markdown faces, keeping every original character."
+(defun agent-dash--markdown (text &optional hide-markup)
+  "Return TEXT with Markdown faces, omitting delimiters when HIDE-MARKUP is non-nil."
   (with-temp-buffer
     (insert text)
     (delay-mode-hooks (gfm-mode))
+    (when hide-markup (markdown-toggle-markup-hiding 1))
     (font-lock-ensure)
+    (when hide-markup
+      ;; Remove hidden runs before the caller measures or wraps the display text.
+      (let ((start (point-min)))
+        (while (< start (point-max))
+          (let ((end (next-property-change start nil (point-max))))
+            (if (or (eq (get-text-property start 'invisible) 'markdown-markup)
+                    (equal (get-text-property start 'display) ""))
+                (delete-region start end)
+              (setq start end))))))
     (buffer-string)))
 
 (defun agent-dash--backend-name (backend)

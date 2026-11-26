@@ -531,6 +531,11 @@ ROLE is `user' or `assistant'."
   (ignore id)
   (user-error "Backend %s cannot read saved transcripts" backend))
 
+(cl-defgeneric agent-dash-backend-history-items (backend row)
+  "Return a replayed session with rich history for BACKEND's ROW, or nil."
+  (ignore backend row)
+  nil)
+
 (cl-defgeneric agent-dash-backend-delete (backend session)
   "Permanently delete saved SESSION of BACKEND.
 SESSION is a plist from `agent-dash-backend-sessions'."

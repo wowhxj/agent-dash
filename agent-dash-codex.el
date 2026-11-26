@@ -442,8 +442,8 @@ Return (ITEM-ID . WHOLE-TEXT)."
                       :running (and (agent-dash-holder-find 'codex id) t))))
             (agent-dash-codex--listed-threads root))))
 
-(cl-defmethod agent-dash-backend-transcript ((_ (eql codex)) id)
-  "Codex `agent-dash-backend-transcript' for ID."
+(defun agent-dash-codex--dialogue (id &optional session)
+  "Read ID's dialogue, populating SESSION with images when supplied."
   (let (turns)
     (dolist (turn (agent-dash-jget (agent-dash-holder-oneshot
                                     (agent-dash-codex--command)
@@ -451,12 +451,24 @@ Return (ITEM-ID . WHOLE-TEXT)."
                                       ("thread/read" . (:threadId ,id :includeTurns t))))
                                    "thread" "turns"))
       (dolist (item (agent-dash-jget turn "items"))
-        (pcase (agent-dash-jget item "type")
-          ("userMessage" (push (cons 'user (agent-dash-codex--input-text
-                                            (agent-dash-jget item "content")))
-                               turns))
-          ("agentMessage" (push (cons 'assistant (agent-dash-jget item "text")) turns)))))
-    (nreverse turns)))
+        (let ((type (agent-dash-jget item "type")))
+          (if session
+              (when (member type '("userMessage" "agentMessage" "imageGeneration"))
+                (agent-dash-codex--item session item))
+            (pcase type
+              ("userMessage" (push (cons 'user (agent-dash-codex--input-text
+                                                (agent-dash-jget item "content"))) turns))
+              ("agentMessage" (push (cons 'assistant (agent-dash-jget item "text")) turns)))))))
+    (if session session (nreverse turns))))
+
+(cl-defmethod agent-dash-backend-transcript ((_ (eql codex)) id)
+  "Read dialogue text for saved session ID."
+  (agent-dash-codex--dialogue id))
+
+(cl-defmethod agent-dash-backend-history-items ((_ (eql codex)) row)
+  "Read saved dialogue and images for ROW."
+  (let ((root (or (plist-get row :root) default-directory)))
+    (agent-dash-codex--dialogue (plist-get row :id) (agent-dash-session-create 'codex root))))
 
 (provide 'agent-dash-codex)
 ;;; agent-dash-codex.el ends here

@@ -99,6 +99,38 @@ class AgyBackupTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '无效归档路径'):
             self.plan()
 
+    def test_retire_is_verified_and_recoverable_with_a_stale_index_row(self):
+        self.install(self.plan()['preview_token'])
+        other = self.dest / self.dbname.replace(SID, 'other')
+        other.write_bytes(b'unrelated')
+        index_path = self.dest / 'conversation_summaries.db'
+        with closing(sqlite3.connect(index_path)) as index:
+            index.execute('create table conversation_summaries(conversation_id text)')
+            index.execute('insert into conversation_summaries values (?)', (SID,))
+            index.commit()
+        changed = self.dest / f'annotations/{SID}.pbtxt'
+        changed.write_bytes(b'changed after export')
+        # Take the same kind of backup as the migration command, in the destination profile.
+        native = self.dest.parent / 'native.zip'
+        with closing(sqlite3.connect(index_path)) as index:
+            index.execute('alter table conversation_summaries add column workspace_uris text')
+            index.commit()
+        backup.export(self.dest, [SID], native)
+        changed.write_bytes(b'changed again')
+        with self.assertRaisesRegex(ValueError, '源会话已变化'):
+            backup.retire(self.dest, SID, native)
+        self.assertTrue((self.dest / self.dbname).is_file())
+        changed.write_bytes(b'changed after export')
+        moved = Path(backup.retire(self.dest, SID, native)['holding'])
+        self.assertFalse((self.dest / self.dbname).exists())
+        self.assertTrue((moved / self.dbname).is_file())
+        self.assertEqual(other.read_bytes(), b'unrelated')
+        self.assertEqual(self.plan()['sessions'][0]['action'], 'conflict')
+        plan = self.plan(input=native)
+        self.assertEqual(plan['sessions'][0]['action'], 'create')
+        self.plan(input=native, command='import', preview_token=plan['preview_token'])
+        self.assertEqual(changed.read_bytes(), b'changed after export')
+
     def test_install_rollback_with_racing_target(self):
         plan = self.plan()
         real_link = backup.os.link

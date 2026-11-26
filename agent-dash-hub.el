@@ -951,10 +951,15 @@ Candidates keep the list order and show the table header as their group."
                        (expand-file-name agent-dash-pi-sessions-directory)
                        (expand-file-name "conversion-archives" agent-dash-directory))))
       (if (eq backend 'agy)
-          (append (list "node" agent-dash-hub--agy-convert-file
-                        (symbol-name (or destination 'pi)) (agent-dash-agy--executable)
-                        (agent-dash-hub--backup-local agent-dash-agy-directory))
-                  paths)
+          (progn
+            (when (and (not (eq destination 'export))
+                       (or (agent-dash-hub-live-p row)
+                           (agent-dash-holder-find 'agy (plist-get row :id))))
+              (user-error "%s 正在运行或已打开，请关闭后再迁移" (plist-get row :key)))
+            (append (list "node" agent-dash-hub--agy-convert-file
+                          (symbol-name (or destination 'pi)) (agent-dash-agy--executable)
+                          (agent-dash-hub--backup-local agent-dash-agy-directory))
+                    paths (unless (eq destination 'export) '("--move"))))
         (unless (and source (file-name-absolute-p source) (not (file-remote-p source))
                      (file-regular-p source) (file-readable-p source))
           (user-error "找不到可读的本地会话文件：%s" source))
@@ -979,7 +984,9 @@ Candidates keep the list order and show the table header as their group."
          (archive (agent-dash-jget reply "archive"))
          (warnings (agent-dash-jget reply "warnings"))
          (notes (agent-dash-jget reply "notes"))
-         (migration (agent-dash-jget reply "migration")))
+         (migration (agent-dash-jget reply "migration"))
+         (source-name (if (equal (agent-dash-jget reply "migrationBackend") "agy")
+                          "Antigravity" "Claude")))
     (unless (and (stringp file) (stringp id) (stringp archive))
       (error "转换器返回的会话信息不完整"))
     (list (or migration t)
@@ -989,13 +996,17 @@ Candidates keep the list order and show the table header as their group."
                      ('export (format "导入包 %s" file))
                      (_ (format "%s  %s" id file)))
                    (format "\n  归档 %s" archive)
+                   (when-let* ((native (agent-dash-jget reply "nativeBackup")))
+                     (format "\n  原生恢复包 %s" native))
+                   (when-let* ((holding (agent-dash-jget reply "nativeHolding")))
+                     (format "\n  原件存放于 %s" holding))
                    (when-let* ((workspace (agent-dash-jget reply "workspaceId")))
                      (format "\n  工作区 %s" workspace))
                    (pcase migration
-                     ("moved" "\n  Claude 原件已迁出")
+                     ("moved" (format "\n  %s 原件已迁出" source-name))
                      ("retained"
-                      (format "\n  ⚠ %s，Claude 原件保留：%s"
-                              (if (eq destination 'dsh) "DSH 会话已验证" "Pi 已生成")
+                      (format "\n  ⚠ %s，%s 原件保留：%s"
+                              (if (eq destination 'dsh) "DSH 会话已验证" "Pi 已生成") source-name
                               (agent-dash-jget reply "migrationError"))))
                    (mapconcat (lambda (w) (format "\n  ⚠ %s" w)) warnings "")
                    (when notes
@@ -1235,7 +1246,7 @@ Candidates keep the list order and show the table header as their group."
   (let* ((action (pcase destination ('dsh "导入 DSH") ('export "导出 DSH 导入包") (_ "转换到 Pi")))
          (backend (or destination 'pi))
          (report (generate-new-buffer (format "*Agent Dash · %s*" action)))
-         (success 0) (retained 0) moved (total (length rows))
+         (success 0) (retained 0) moved source-refresh (total (length rows))
          (hub (current-buffer))
          (source (plist-get (car rows) :key))
          (follow (and (not (eq destination 'export)) (= total 1)
@@ -1257,8 +1268,13 @@ Candidates keep the list order and show the table header as their group."
                                                          (format "%s:%s" backend id)))))
                              (pcase ok
                                ("retained" (cl-incf retained)
-                                (unless (eq destination 'dsh) (setq follow nil)))
-                               ("moved" (push (plist-get row :key) moved)))
+                                (if (eq destination 'dsh)
+                                    (cl-pushnew (or (plist-get row :backend) 'claude)
+                                                source-refresh)
+                                  (setq follow nil)))
+                               ("moved" (push (plist-get row :key) moved)
+                                (cl-pushnew (or (plist-get row :backend) 'claude)
+                                            source-refresh)))
                              (when (buffer-live-p report)
                                (with-current-buffer report
                                  (agent-dash-hub--report-add
@@ -1284,10 +1300,11 @@ Candidates keep the list order and show the table header as their group."
                       (with-current-buffer hub
                         (when agent-dash-hub--marks
                           (dolist (key moved) (remhash key agent-dash-hub--marks)))))
-                    (agent-dash-hub--reload-after-conversion 'claude)))))
+                    (dolist (source-backend source-refresh)
+                      (agent-dash-hub--reload-after-conversion source-backend))))))
              (message "%s完成：成功 %d，失败 %d%s" action success (- total success)
                       (if (or moved (> retained 0))
-                          (format "，Claude 原件已迁出 %d、已保留 %d" (length moved) retained)
+                          (format "，原件已迁出 %d、已保留 %d" (length moved) retained)
                         "")))))
       (next))
     report))
@@ -1815,6 +1832,8 @@ Candidates keep the list order and show the table header as their group."
   :type 'number)
 
 (defvar-local agent-dash-hub--details-row nil)
+(defvar-local agent-dash-hub--details-images nil
+  "Image lists aligned with the cached conversation turns.")
 (defvar-local agent-dash-hub--details-turns nil "Cached (ROLE . TEXT) list, or an error string.")
 (defvar-local agent-dash-hub--details-width nil)
 (defvar-local agent-dash-hub--details-expanded nil "Whether the metadata is shown.")
@@ -1834,13 +1853,15 @@ Candidates keep the list order and show the table header as their group."
               (nreverse (cons line rows))))
           (split-string text "\n")))
 
-(defun agent-dash-hub--bubble (role text width)
-  "Insert TEXT of ROLE as a chat bubble in a window WIDTH wide."
+(defun agent-dash-hub--bubble (role text width &optional images)
+  "Insert TEXT and IMAGES of ROLE as a chat bubble in a window WIDTH wide."
   (let* ((user (eq role 'user))
          (max-width (max 8 (min agent-dash-hub-message-width
                                 (floor (* (max 12 (- width 4))
                                           agent-dash-hub-message-width-ratio)))))
-         (rows (agent-dash-hub--wrap text (- max-width 4)))
+         (rows (unless (and images (string-empty-p text))
+                 (agent-dash-hub--wrap (if user text (agent-dash--markdown text t))
+                                       (- max-width 4))))
          (label (if user "用户"
                   (upcase (symbol-name (plist-get agent-dash-hub--details-row :backend)))))
          (bubble (min max-width (max 18 (+ 4 (apply #'max 0 (mapcar #'string-width rows))))))
@@ -1854,11 +1875,12 @@ Candidates keep the list order and show the table header as their group."
     (insert (propertize (make-string (max 0 (- bubble (string-width heading) 4)) ?\s) 'face face)
             "\n")
     (dolist (row rows)
-      (insert indent
-              (propertize (concat "  " row
-                                  (make-string (max 0 (- bubble 2 (string-width row))) ?\s))
-                          'face face)
-              "\n"))
+      (let ((start (point)))
+        (insert indent "  " row (make-string (max 0 (- bubble 2 (string-width row))) ?\s))
+        (add-face-text-property (+ start (length indent)) (point) face t)
+        (insert "\n")))
+    (dolist (image images)
+      (insert indent "  " (agent-dash-image-string image) "\n"))
     (insert "\n")))
 
 (defun agent-dash-hub--details-metadata ()
@@ -1892,6 +1914,7 @@ Candidates keep the list order and show the table header as their group."
          (width (max 24 (or width (window-body-width (get-buffer-window (current-buffer)))
                             (frame-width))))
          (turns agent-dash-hub--details-turns)
+         (images agent-dash-hub--details-images)
          (id (plist-get row :id))
          (identity (format "%s · %s" (upcase (symbol-name (plist-get row :backend)))
                            (substring id 0 (min 8 (length id)))))
@@ -1919,12 +1942,12 @@ Candidates keep the list order and show the table header as their group."
                         'action (lambda (_) (agent-dash-hub-details-toggle-metadata)))
     (insert "\n")
     (when agent-dash-hub--details-expanded (insert (agent-dash-hub--details-metadata)))
-    (insert (propertize "\n对话" 'face 'bold)
-            (propertize "  ·  agent 左 / 用户右  ·  思考与工具调用不在此展示\n\n" 'face 'shadow))
+    (insert (propertize "\n对话" 'face 'bold) "\n\n")
     (if (stringp turns)
         (insert (format "[读取对话失败：%s]\n" turns))
-      (unless turns (insert "[没有可显示的用户/助手对话文本]\n"))
-      (dolist (turn turns) (agent-dash-hub--bubble (car turn) (cdr turn) width)))
+      (unless turns (insert "[没有可显示的用户/助手消息]\n"))
+      (dolist (turn turns)
+        (agent-dash-hub--bubble (car turn) (cdr turn) width (pop images))))
     (goto-char (min position (point-max)))
     (set-buffer-modified-p nil)))
 
@@ -1946,7 +1969,23 @@ Candidates keep the list order and show the table header as their group."
       (setq agent-dash-hub--details-row row
             agent-dash-hub--details-turns
             (condition-case err
-                (agent-dash-backend-transcript (plist-get row :backend) (plist-get row :id))
+                (let* ((backend (plist-get row :backend))
+                       (agent-dash-event-functions nil)
+                       (agent-dash-update-functions nil)
+                       (history (agent-dash-backend-history-items backend row)))
+                  (if history
+                      (let (turns images)
+                        (dolist (item (agent-dash-session-items history))
+                          (let ((role (plist-get item :type))
+                                (text (or (plist-get item :text) ""))
+                                (attachments (plist-get item :images)))
+                            (when (and (memq role '(user assistant))
+                                       (or attachments (not (string-blank-p text))))
+                              (push (cons role text) turns)
+                              (push attachments images))))
+                        (setq agent-dash-hub--details-images (nreverse images))
+                        (nreverse turns))
+                    (agent-dash-backend-transcript backend (plist-get row :id))))
               (error (error-message-string err)))))
     (agent-dash-hub--show buffer)
     (with-current-buffer buffer (agent-dash-hub--details-render))))
@@ -2104,10 +2143,10 @@ whole original conversation."
   "Choose the scope of a native session conversion."
   :display-action agent-dash-hub--display
   [[:description (lambda () (agent-dash-hub--describe 'convert))
-                 ("s" "转到 Pi（Claude 原件验证后迁出）" agent-dash-hub-convert-session)
-                 ("d" "导入 DSH（Claude 原件验证后迁出）" agent-dash-hub-import-dsh)
+                 ("s" "转到 Pi（Claude / agy 原件验证后迁出）" agent-dash-hub-convert-session)
+                 ("d" "导入 DSH（Claude / agy 原件验证后迁出）" agent-dash-hub-import-dsh)
                  ("e" "仅导出 DSH 包" agent-dash-hub-export-dsh)]
-   ["批量转到 Pi（Claude 原件验证后迁出）"
+   ["批量转到 Pi（Claude / agy 原件验证后迁出）"
     ("p" "当前项目的全部已加载会话" agent-dash-hub-convert-project)
     ("b" "指定后端的全部已加载会话" agent-dash-hub-convert-backend)]
    ["返回"

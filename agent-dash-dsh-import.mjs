@@ -99,7 +99,7 @@ async function run(zip, directory, { base, cookie }) {
   // an interrupted upload without a verifiable result must never start a POST.
   const state = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'agent-dash', 'dsh-imports');
   mkdirSync(state, { recursive: true, mode: 0o700 });
-  const claim = join(state, hash(JSON.stringify([cwd, source])));
+  const claim = join(state, hash(JSON.stringify(marker.includes(' (dialogue v2); SHA-256 ') ? [cwd, source, marker] : [cwd, source])));
   const prior = statSync(claim, { throwIfNoEntry: false });
   if (prior) {
     const id = readFileSync(claim, 'utf8');

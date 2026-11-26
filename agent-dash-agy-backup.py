@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import urllib.parse
 import zipfile
@@ -136,17 +137,23 @@ def snapshot_db(path, sid):
         return read_file(target)
 
 
-def offline(home):
-    # This observes the destination profile only; it cannot prevent a new
-    # process from starting, so the caller must also keep agy stopped.
-    try:
-        result = subprocess.run(['lsof', '-t', '+D', str(home)], capture_output=True, timeout=15)
-    except (FileNotFoundError, subprocess.SubprocessError) as e:
-        raise ValueError('无法检查目标 agy 目录是否使用中') from e
-    pids = set(result.stdout.split())
-    pids.discard(str(os.getpid()).encode())
-    check(result.returncode in (0, 1) and not pids and not result.stderr,
-          '目标 agy 目录正在使用或无法确认状态，请停止使用该目录的进程')
+def offline(home, wait=0):
+    # A just-closed ACP process can leave its native service shutting down.
+    # This check observes the profile only; keep it stopped during the move.
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            result = subprocess.run(['lsof', '-t', '+D', str(home)], capture_output=True, timeout=15)
+        except (FileNotFoundError, subprocess.SubprocessError) as e:
+            raise ValueError('无法检查目标 agy 目录是否使用中') from e
+        pids = set(result.stdout.split()) - {str(os.getpid()).encode()}
+        if result.returncode in (0, 1) and not result.stderr:
+            if not pids:
+                return
+            if time.monotonic() < deadline:
+                time.sleep(0.25)
+                continue
+        raise ValueError('目标 agy 目录正在使用或无法确认状态，请停止使用该目录的进程')
 
 
 def workspace_index(home, ids):
@@ -169,6 +176,67 @@ def workspace_index(home, ids):
     return result
 
 
+def session_files(home, sid):
+    database = 'conversations/' + sid + '.db'
+    files = {database: snapshot_db(safe_child(home, database), sid)}
+    for rel in ('annotations/' + sid + '.pbtxt', 'brain/' + sid):
+        source = safe_child(home, rel)
+        if source.is_file():
+            files[rel] = read_file(source)
+        elif source.is_dir():
+            for item in sorted(source.rglob('*')):
+                check(not item.is_symlink(), '不支持会话附件中的符号链接')
+                if item.is_file():
+                    name = item.relative_to(home).as_posix()
+                    check(member_id(name) == sid, '会话附件与会话 ID 不匹配')
+                    files[name] = read_file(item)
+    return files
+
+
+def retire(home, sid, archive):
+    """Move one verified session out of the native inventory, on the same filesystem."""
+    home = home_path(home)
+    safe_id(sid)
+    manifest, backed_up = unpack(archive)
+    check([row['id'] for row in manifest['sessions']] == [sid], '原生归档会话 ID 不匹配')
+    database = 'conversations/' + sid + '.db'
+    with restore_lock(home):
+        offline(home, wait=5)
+        check(session_files(home, sid) == backed_up, 'Antigravity 源会话已变化，保留原件')
+        offline(home)
+        files = [database + ext for ext in ('-wal', '-shm', '-journal')]
+        files += ['annotations/' + sid + '.pbtxt', 'brain/' + sid, database]
+        binaries = [(name, safe_child(home, name)) for name in files]
+        holding = safe_child(home, '.agent-dash-retired')
+        holding.mkdir(mode=0o700, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=sid + '-', dir=holding))
+        moved = []
+        try:
+            for name, source in binaries:
+                if source.exists():
+                    target = stage / name
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    source.rename(target)
+                    moved.append((source, target))
+                    sync_directory(target.parent)
+                    sync_directory(source.parent)
+            check(any(source == home / database for source, _ in moved), '源数据库已消失')
+            with (stage / 'receipt').open('xb') as receipt:
+                receipt.write(digest(canonical(manifest)).encode())
+                receipt.flush()
+                os.fsync(receipt.fileno())
+            sync_directory(stage)
+            sync_directory(holding)
+        except BaseException:
+            for source, target in reversed(moved):
+                if source.exists():
+                    raise ValueError(f'源路径已被占用，请从 {stage} 恢复')
+                target.rename(source)
+                sync_directory(source.parent)
+            raise
+    return {'holding': str(stage)}
+
+
 def export(home, ids, output):
     check(ids and len(ids) == len(set(ids)), '会话 ID 为空或重复')
     for sid in ids:
@@ -180,19 +248,7 @@ def export(home, ids, output):
     files = {}
     sessions = []
     for sid in ids:
-        name = 'conversations/' + sid + '.db'
-        files[name] = snapshot_db(safe_child(home, name), sid)
-        for rel in ('annotations/' + sid + '.pbtxt', 'brain/' + sid):
-            source = safe_child(home, rel)
-            if source.is_file():
-                files[rel] = read_file(source)
-            elif source.is_dir():
-                for item in source.rglob('*'):
-                    check(not item.is_symlink(), '不支持会话附件中的符号链接')
-                    if item.is_file():
-                        name = item.relative_to(home).as_posix()
-                        member_path(name)
-                        files[name] = read_file(item)
+        files.update(session_files(home, sid))
         sessions.append({'id': sid, 'cwd': paths[sid][0] if paths[sid] else '', 'workspaces': paths[sid]})
     check(len(files) <= 10000 and sum(map(len, files.values())) <= TOTAL, '备份内容超过限制')
     manifest = {'format': 'agent-dash-agy', 'version': 1, 'sessions': sessions,
@@ -267,6 +323,20 @@ def identical(home, sid, files):
                                       for name in actual)
 
 
+def retired_matches(home, sid, manifest):
+    holding = safe_child(home, '.agent-dash-retired')
+    if not holding.is_dir():
+        return False
+    expected = digest(canonical(manifest)).encode()
+    for stage in holding.glob(sid + '-*'):
+        if stage.is_symlink() or not stage.is_dir():
+            continue
+        receipt = safe_child(stage, 'receipt')
+        if receipt.is_file() and read_file(receipt) == expected:
+            return True
+    return False
+
+
 def restore(a):
     home = home_path(a.home)
     manifest, files = unpack(a.input)
@@ -287,7 +357,9 @@ def restore(a):
         destination = safe_child(home, database)
         candidates = [database + ext for ext in ('', '-wal', '-shm', '-journal')]
         candidates += ['brain/' + sid, 'annotations/' + sid + '.pbtxt']
-        existing = sid in indexed or any(safe_child(home, name).exists() for name in candidates)
+        existing = any(safe_child(home, name).exists() for name in candidates)
+        if sid in indexed and not existing and not retired_matches(home, sid, manifest):
+            existing = True
         action = ('busy' if sid in a.active_id else
                   'skip' if destination.is_file() and identical(home, sid, files) else
                   'conflict' if existing else 'create')
@@ -341,15 +413,22 @@ def install(home, files):
 
 def main():
     p = argparse.ArgumentParser(); subs = p.add_subparsers(dest='command', required=True)
-    for cmd in ('export', 'preview', 'import'):
+    for cmd in ('export', 'preview', 'import', 'retire'):
         q = subs.add_parser(cmd); q.add_argument('--home', required=True)
         if cmd == 'export':
             q.add_argument('--output', required=True); q.add_argument('--id', action='append', required=True)
+        elif cmd == 'retire':
+            q.add_argument('--input', required=True); q.add_argument('--id', required=True)
         else:
             q.add_argument('--input', required=True); q.add_argument('--active-id', action='append', default=[]); q.add_argument('--map', nargs=2, action='append', default=[])
             if cmd == 'import': q.add_argument('--preview-token', required=True)
     a = p.parse_args()
-    result = export(a.home, a.id, a.output) if a.command == 'export' else restore(a)
+    if a.command == 'export':
+        result = export(a.home, a.id, a.output)
+    elif a.command == 'retire':
+        result = retire(a.home, a.id, a.input)
+    else:
+        result = restore(a)
     print(json.dumps(result, ensure_ascii=False))
 
 

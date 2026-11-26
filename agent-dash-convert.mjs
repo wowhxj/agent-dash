@@ -249,14 +249,6 @@ function codexEchoes(rows) {
 
 // ACP replays saved messages and only the tool fields exposed by the agent.
 function replayAgy(rows, id, emit, assistant, warn, note) {
-  const tools = new Map();
-  for (const row of rows) {
-    if (row.method !== 'session/update' || row.params?.sessionId !== id) continue;
-    const update = row.params.update;
-    if (!nonempty(update?.toolCallId)) continue;
-    const prior = tools.get(update.toolCallId) ?? {};
-    tools.set(update.toolCallId, { ...prior, ...update });
-  }
   function content(block, role) {
     if (block?.type === 'text' && typeof block.text === 'string') return [text(block.text)];
     if (block?.type === 'image' && nonempty(block.data) && /^image\//.test(block.mimeType) && role !== 'assistant')
@@ -270,7 +262,6 @@ function replayAgy(rows, id, emit, assistant, warn, note) {
     if (kind === 'assistant') assistant(pending);
     pending = [];
   };
-  const handled = new Set();
   for (const row of rows) {
     if (row.type === 'agy_session') continue;
     if (row.method !== 'session/update' || row.params?.sessionId !== id)
@@ -293,25 +284,10 @@ function replayAgy(rows, id, emit, assistant, warn, note) {
         break;
       }
       case 'tool_call':
-      case 'tool_call_update': {
+      case 'tool_call_update':
         flush(); kind = undefined;
-        if (handled.has(u.toolCallId)) break;
-        handled.add(u.toolCallId);
-        const tool = tools.get(u.toolCallId) ?? u;
-        // Saved Antigravity tool calls may omit results or formal tool arguments.
-        // Keep those in dialogue context without constructing incomplete Pi tool pairs.
-        const name = tool.name || tool.kind || 'tool';
-        const lines = [`[Antigravity tool: ${name}; ${tool.status || 'unknown'}]`, tool.title];
-        const input = tool.rawInput ?? tool.args;
-        if (input !== undefined) lines.push(JSON.stringify(input));
-        if (tool.rawOutput !== undefined) lines.push(JSON.stringify(tool.rawOutput));
-        const result = Array.isArray(tool.content) ? tool.content.flatMap(part =>
-          part?.type === 'content' ? content(part.content, 'toolResult') : []) : [];
-        assistant([text(lines.filter(Boolean).join('\n')), ...result.filter(part => part.type === 'text')]);
-        if (result.some(part => part.type === 'image')) warn('archived Antigravity tool image');
-        note('Antigravity tool history rendered as text');
+        note('Antigravity tool calls and results retained in the replay archive');
         break;
-      }
       case 'available_commands_update': case 'session_info_update': case 'config_option_update':
       case 'current_mode_update': case 'usage_update': case 'plan':
         note(`archived Antigravity ${u.sessionUpdate}`);
@@ -438,7 +414,8 @@ function convert(backend, source, sourceId, cwd, piRoot, archiveRoot, pinnedFd) 
       stopReason: native.stop_reason === 'max_tokens' ? 'length' : 'stop' });
   }
   cwd = resolve(cwd);
-  const sha256 = digest(raw), key = digest(JSON.stringify([backend, sourceId, cwd, sha256]));
+  const sha256 = digest(raw);
+  const key = digest(JSON.stringify([backend, sourceId, cwd, sha256, ...(backend === 'agy' ? [2] : [])]));
   const id = `${key.slice(0, 8)}-${key.slice(8, 12)}-8${key.slice(13, 16)}-a${key.slice(17, 20)}-${key.slice(20, 32)}`;
   const pi = directory(resolve(piRoot)), archives = directory(resolve(archiveRoot));
   if (initial && (pi !== resolve(piRoot) || archives !== resolve(archiveRoot))) throw new Error('Migration output directory was redirected');

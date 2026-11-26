@@ -855,8 +855,8 @@ This runs on protocol input, never during display-only redraw."
                                                                  picked)))
                                               (list :custom (string-join custom ", "))))))))))))
 
-(defun agent-dash-dsh--dialogue-message (event)
-  "Extract a spoken user or assistant message from EVENT."
+(defun agent-dash-dsh--dialogue-message (event &optional session)
+  "Extract dialogue from EVENT, including images when given SESSION."
   (let* ((data (agent-dash-jget event "data"))
          (message (agent-dash-jget data "message"))
          (role (pcase (agent-dash-jget event "type")
@@ -866,11 +866,14 @@ This runs on protocol input, never during display-only redraw."
                     'user))
                  ("assistant/message" 'assistant))))
     (when role
-      (let ((text (agent-dash-dsh--text (agent-dash-jget message "content") "text")))
-        (unless (string-blank-p text) (cons role text))))))
+      (let* ((blocks (agent-dash-jget message "content"))
+             (text (agent-dash-dsh--text blocks "text")))
+        (if session
+            (list :type role :text text :images (agent-dash-dsh--images session blocks))
+          (unless (string-blank-p text) (cons role text)))))))
 
-(cl-defmethod agent-dash-backend-transcript ((_ (eql dsh)) id)
-  "Read ID's dialogue from bounded DSH history pages in chronological order."
+(defun agent-dash-dsh--dialogue (id &optional session)
+  "Read ID's dialogue in chronological order, including images for SESSION."
   (let ((address (list :kind "session" :sessionId id))
         (more t) before transcript)
     (while more
@@ -882,7 +885,7 @@ This runs on protocol input, never during display-only redraw."
         ;; Each page is chronological, and beforeSeq is exclusive.
         (dolist (record (reverse records))
           (when-let* ((message (agent-dash-dsh--dialogue-message
-                                (agent-dash-jget record "event"))))
+                                (agent-dash-jget record "event") session)))
             (push message transcript)))
         (setq more (agent-dash-jget page "hasMore"))
         (when more
@@ -890,7 +893,20 @@ This runs on protocol input, never during display-only redraw."
             (unless (and (integerp next) (> next 0) (or (not before) (< next before)))
               (error "DSH history pagination did not advance for %s" id))
             (setq before next)))))
-    transcript))
+    (if session
+        (dolist (message transcript session) (agent-dash-emit session message))
+      transcript)))
+
+(cl-defmethod agent-dash-backend-transcript ((_ (eql dsh)) id)
+  "Read dialogue text for saved session ID."
+  (agent-dash-dsh--dialogue id))
+
+(cl-defmethod agent-dash-backend-history-items ((_ (eql dsh)) row)
+  "Read saved dialogue and images for ROW."
+  (let ((id (plist-get row :id))
+        (session (agent-dash-session-create 'dsh (or (plist-get row :root) default-directory))))
+    (agent-dash-set-data session :sid id)
+    (agent-dash-dsh--dialogue id session)))
 
 (defun agent-dash-dsh--prompts (id)
   "Return the user prompts of session ID from the Host's projection cache.

@@ -165,17 +165,18 @@ A change of kind, or a tool call in between, starts a new item."
   "Return the cwd and MCP parameters of SESSION."
   (list :cwd (directory-file-name (agent-dash-session-root session)) :mcpServers []))
 
-(defun agent-dash-acp-start (session command &optional resume-id)
-  "Run ACP COMMAND for SESSION, optionally restoring RESUME-ID."
+(defun agent-dash-acp-start (session command &optional resume-id on-record)
+  "Run ACP COMMAND for SESSION, optionally restoring RESUME-ID.
+Dispatch records to ON-RECORD when supplied."
   (let* ((backend (agent-dash-session-backend session))
          (live (and resume-id (agent-dash-holder-find backend resume-id))))
     (if live
         (progn (agent-dash-set-data session :sid resume-id)
-               (agent-dash-holder-attach session live #'agent-dash-acp-record t))
+               (agent-dash-holder-attach session live (or on-record #'agent-dash-acp-record) t))
       (let ((dir (agent-dash-holder-dir backend (agent-dash-uuid))))
         (agent-dash-holder-start dir (agent-dash-session-root session)
                                  command)
-        (agent-dash-holder-attach session dir #'agent-dash-acp-record t)
+        (agent-dash-holder-attach session dir (or on-record #'agent-dash-acp-record) t)
         (agent-dash-holder-request
          session "initialize" agent-dash-acp-client
          (lambda (result _error)
@@ -251,6 +252,20 @@ A change of kind, or a tool call in between, starts a new item."
                     rows)))
           (setq cursor (agent-dash-jget result "nextCursor"))))
     (nreverse rows)))
+
+(defun agent-dash-acp-load-history (session command id cwd)
+  "Populate SESSION from ACP COMMAND replay of ID in CWD."
+  (agent-dash-holder-oneshot
+   command `(("initialize" . ,agent-dash-acp-client)
+             ("session/load" . (:sessionId ,id :cwd ,cwd :mcpServers [])))
+   (lambda (record)
+     (when (equal (agent-dash-jget record "method") "session/update")
+       (let ((update (agent-dash-jget record "params" "update")))
+         (pcase (agent-dash-jget update "sessionUpdate")
+           ((or "user_message_chunk" "agent_message_chunk")
+            (agent-dash-acp-update session update))
+           ((or "tool_call" "agent_thought_chunk")
+            (agent-dash-set-data session :kind nil))))))))
 
 (defun agent-dash-acp-transcript (command id root &optional timeout)
   "Read session ID under ROOT through ACP COMMAND, with optional TIMEOUT."

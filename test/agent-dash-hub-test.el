@@ -754,6 +754,26 @@
    (should (eq (car (car agent-dash-fake-calls)) 'start))
    (let ((agent-dash--quitting t)) (kill-buffer (agent-dash-session-buffer (car agent-dash--sessions))))))
 
+(ert-deftest agent-dash-hub-test-details-markdown ()
+  (with-temp-buffer
+    (setq agent-dash-hub--details-row '(:backend agy))
+    (let ((source "# Heading\n\n**Bold** and `code`\n\n```text\nline\n```"))
+      (agent-dash-hub--bubble 'assistant source 36)
+      (goto-char (point-min))
+      (should (search-forward "Heading" nil t))
+      (should (memq 'markdown-header-face-1 (get-text-property (1- (point)) 'face)))
+      (should (search-forward "Bold" nil t))
+      (should (memq 'markdown-bold-face (get-text-property (1- (point)) 'face)))
+      (should (search-forward "code" nil t))
+      (should (memq 'markdown-inline-code-face (get-text-property (1- (point)) 'face)))
+      (should-not (string-match-p "# Heading\\|\\*\\*Bold\\*\\*\\|```" (buffer-string)))
+      (goto-char (point-min))
+      (button-activate (next-button (point)))
+      (should (equal (current-kill 0) source))
+      (erase-buffer)
+      (agent-dash-hub--bubble 'user "**literal**" 36)
+      (should (string-search "**literal**" (buffer-string))))))
+
 (ert-deftest agent-dash-hub-test-summary-job-and-status ()
   (agent-dash-hub-test-with-hub
    (let* ((row (seq-find (lambda (r) (equal (plist-get r :id) "s1-aaaaaaaa")) (agent-dash-hub--all)))

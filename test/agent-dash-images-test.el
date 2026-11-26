@@ -479,5 +479,63 @@
                      agent-dash-images-test--png))
       (should-not (string-search agent-dash-images-test--png (plist-get (car messages) :text))))))
 
+(ert-deftest agent-dash-images-test-agy-restores-native-images-in-prompt-order ()
+  (let* ((session (agent-dash-session-create 'agy temporary-file-directory))
+         (png agent-dash-images-test--png)
+         (prompts (agent-dash-images-test--json
+                   (vector (list :text "same prompt" :images ["invalid"])
+                           (list :text "same prompt" :images (vector png))))))
+    (agent-dash-emit session '(:type user :id "first" :text "same prompt"))
+    (agent-dash-emit session '(:type user :id "second" :text "same prompt"))
+    (cl-letf (((symbol-function 'agent-dash-agy--native-prompts) (lambda (_) prompts)))
+      (agent-dash-agy--restore-images session "test-id")
+      (should-not (plist-get (agent-dash-item session "first") :images))
+      (let* ((item (agent-dash-item session "second"))
+             (image (car (plist-get item :images))))
+        (should (equal (plist-get image :mime-type) "image/png"))
+        (should (equal (plist-get image :data) png))
+        (agent-dash-agy--restore-images session "test-id")
+        (should (equal (plist-get item :images) (list image)))))))
+
+(ert-deftest agent-dash-images-test-hub-history-across-backends ()
+  (let ((row (list :id "saved" :root temporary-file-directory))
+        (block (agent-dash-images-test--block))
+        (claude (agent-dash-images-test--block 'claude)))
+    (dolist (backend '(pi claude codex dsh hermes))
+      (cl-letf (((symbol-function 'agent-dash-pi--file) (lambda (_) "fixture"))
+                ((symbol-function 'file-expand-wildcards) (lambda (&rest _) '("fixture")))
+                ((symbol-function 'agent-dash-file-lines)
+                 (lambda (&rest _)
+                   (list (json-serialize
+                          (list :type (if (eq backend 'pi) "message" "user") :id "message"
+                                :message (list :role "user" :content
+                                               (vector (if (eq backend 'claude) claude block))))))))
+                ((symbol-function 'agent-dash-holder-oneshot)
+                 (lambda (&rest _)
+                   (agent-dash-images-test--json
+                    (list :thread (list :turns
+                                        (vector (list :items
+                                                      (vector (list :type "userMessage" :id "user"
+                                                                    :content (vector block))))))))))
+                ((symbol-function 'agent-dash-dsh--call)
+                 (lambda (method _)
+                   (should (equal method "session/events"))
+                   (agent-dash-images-test--json
+                    (list :records (vector (list :event (list :type "user/message" :seq 1
+                                                               :data (list :content (vector block)))))))))
+                ((symbol-function 'agent-dash-hermes--index) (lambda () "fixture"))
+                ((symbol-function 'agent-dash-sqlite-rows)
+                 (lambda (&rest _)
+                   (list (agent-dash-images-test--json
+                          (list :role "user" :content (json-serialize (vector block))))))))
+        (let* ((session (agent-dash-backend-history-items backend row))
+               (items (agent-dash-session-items session))
+               (item (car items)))
+          (should (equal (list backend (length items)) (list backend 1)))
+          (should (eq (plist-get item :type) 'user))
+          (should (equal (plist-get item :text) ""))
+          (should (equal (plist-get (car (plist-get item :images)) :data)
+                         agent-dash-images-test--png)))))))
+
 (provide 'agent-dash-images-test)
 ;;; agent-dash-images-test.el ends here

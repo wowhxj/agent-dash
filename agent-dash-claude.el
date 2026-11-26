@@ -449,25 +449,40 @@ Recover the startup record for sessions opened before this feature loaded."
           :empty (not first)
           :running (agent-dash-holder-alive-p (agent-dash-holder-dir 'claude id)))))
 
-(cl-defmethod agent-dash-backend-transcript ((_ (eql claude)) id)
-  "Claude `agent-dash-backend-transcript' for ID."
+(defun agent-dash-claude--dialogue (id &optional session)
+  "Read saved dialogue of ID, populating SESSION with images when supplied."
   (let ((file (or (car (file-expand-wildcards
                         (expand-file-name (format "projects/*/%s.jsonl" id)
                                           agent-dash-claude-config-directory)))
                   (user-error "No saved Claude session %s" id)))
         turns)
     (dolist (line (agent-dash-file-lines file))
-      (let ((e (agent-dash-json-read line)))
-        (unless (agent-dash-jget e "isSidechain")
-          (pcase (agent-dash-jget e "type")
-            ("user" (when-let* ((text (agent-dash-claude--prompt-text e)))
-                      (push (cons 'user text) turns)))
-            ("assistant"
-             (let ((text (mapconcat (lambda (b) (if (equal (agent-dash-jget b "type") "text")
-                                                    (agent-dash-jget b "text") ""))
-                                    (agent-dash-jget e "message" "content") "")))
-               (unless (string-blank-p text) (push (cons 'assistant text) turns))))))))
-    (nreverse turns)))
+      (let* ((entry (agent-dash-json-read line))
+             (content (agent-dash-jget entry "message" "content"))
+             (role (unless (agent-dash-jget entry "isSidechain")
+                     (pcase (agent-dash-jget entry "type")
+                       ("user" 'user) ("assistant" 'assistant))))
+             (text (pcase role
+                     ('user (agent-dash-claude--prompt-text entry))
+                     ('assistant (agent-dash-json-text content)))))
+        (when (and text (or session (not (string-blank-p text))))
+          (if session
+              (let ((images (agent-dash-images-from-blocks content (eq role 'user))))
+                (agent-dash-emit session
+                                 (list :type role :images images
+                                       :text (if (and images (eq role 'user))
+                                                 (agent-dash-json-text content) text))))
+            (push (cons role text) turns)))))
+    (if session session (nreverse turns))))
+
+(cl-defmethod agent-dash-backend-transcript ((_ (eql claude)) id)
+  "Read dialogue text for saved session ID."
+  (agent-dash-claude--dialogue id))
+
+(cl-defmethod agent-dash-backend-history-items ((_ (eql claude)) row)
+  "Read saved dialogue and images for ROW."
+  (let ((root (or (plist-get row :root) default-directory)))
+    (agent-dash-claude--dialogue (plist-get row :id) (agent-dash-session-create 'claude root))))
 
 (cl-defmethod agent-dash-backend-delete ((_ (eql claude)) session)
   "Claude `agent-dash-backend-delete' for SESSION."
