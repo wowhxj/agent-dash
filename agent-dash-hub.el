@@ -1698,9 +1698,9 @@ Candidates keep the list order and show the table header as their group."
 (defun agent-dash-hub-relocate-project (old new)
   "Show and open sessions recorded under directory OLD from NEW."
   (interactive
-   (let* ((row (get-text-property (point) 'agent-dash-row))
-          (old (read-directory-name "原项目目录（已改名/移动）：" (plist-get row :root)
-                                    (plist-get row :root))))
+   (let ((old (or (get-text-property (point) 'agent-dash-project-root)
+                  (plist-get (get-text-property (point) 'agent-dash-row) :root)
+                  (user-error "请先选择有项目目录的项目或会话"))))
      (list old (read-directory-name (format "%s 的新位置：" (abbreviate-file-name old)) nil nil t))))
   (let ((old (directory-file-name (expand-file-name old)))
         (new (directory-file-name (expand-file-name new))))

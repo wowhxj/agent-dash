@@ -654,6 +654,31 @@
     (should (equal (agent-dash-hub--relocate "/old/project") "/old/project"))
     (should (plist-get (agent-dash-hub--row 'fake '(:id "x" :root "/old/proj")) :missing))))
 
+(ert-deftest agent-dash-hub-test-relocation-uses-project-at-point ()
+  (agent-dash-hub-test-with-hub
+   (let ((agent-dash-hub-project-relocations nil)
+         (prompts nil) saved)
+     (cl-letf (((symbol-function 'read-directory-name)
+                (lambda (prompt &rest _)
+                  (push prompt prompts)
+                  temporary-file-directory))
+               ((symbol-function 'customize-save-variable)
+                (lambda (_symbol value) (setq saved value)))
+               ((symbol-function 'agent-dash-hub-refresh) #'ignore))
+       (setq agent-dash-hub--grouping 'project)
+       (agent-dash-hub--render)
+       (dolist (key (list (list 'group (abbreviate-file-name agent-dash-hub-test-alpha))
+                          "fake:s1-aaaaaaaa"))
+         (setq prompts nil saved nil)
+         (agent-dash-hub--goto key)
+         (call-interactively #'agent-dash-hub-relocate-project)
+         (should (= (length prompts) 1))
+         (should (equal (caar saved) (directory-file-name agent-dash-hub-test-alpha))))
+       (goto-char (point-min))
+       (setq prompts nil)
+       (should-error (call-interactively #'agent-dash-hub-relocate-project) :type 'user-error)
+       (should-not prompts)))))
+
 (ert-deftest agent-dash-hub-test-new-session-defaults-to-project-heading ()
   "Project headings supply the same default directory as their sessions."
   (agent-dash-hub-test-with-hub
