@@ -1385,6 +1385,25 @@ Candidates keep the list order and show the table header as their group."
               ('hermes agent-dash-hermes-directory)))))
    backends))
 
+(defun agent-dash-hub--backup-export-run (args rows done)
+  "Run export ARGS with summary data for ROWS, then call DONE."
+  (let* ((summaries (agent-dash-summary-backup-export rows))
+         (file (when (> (hash-table-count summaries) 0)
+                 (make-temp-file "agent-dash-backup-summaries-" nil ".json")))
+         started)
+    (unwind-protect
+        (progn
+          (when file
+            (let ((coding-system-for-write 'utf-8-unix))
+              (with-temp-file file (insert (json-serialize summaries)))))
+          (agent-dash-hub--backup-run
+           (append args (when file (list "--summaries" file)))
+           (lambda (result error)
+             (when file (delete-file file))
+             (funcall done result error)))
+          (setq started t))
+      (when (and file (not started) (file-exists-p file)) (delete-file file)))))
+
 (defun agent-dash-hub--backup-export (selected)
   "Export SELECTED rows, or all loaded rows."
   (let* ((rows (agent-dash-hub--backup-rows selected))
@@ -1410,9 +1429,10 @@ Candidates keep the list order and show the table header as their group."
            (homes (agent-dash-hub--backup-homes backends)))
       (while (or (file-exists-p file) (file-symlink-p file))
         (setq file (format "%s-%d.zip" base (cl-incf suffix))))
-      (agent-dash-hub--backup-run
+      (agent-dash-hub--backup-export-run
        (append (list "export" "--output" file) homes
                (cl-mapcan (lambda (row) (list "--session" (plist-get row :key))) rows))
+       rows
        (lambda (result error)
          (let ((notices (agent-dash-hub--backup-notices result error))
                (title (if error "备份导出失败" (format "已导出所选 %d 个会话" (length rows)))))
@@ -1555,11 +1575,27 @@ Candidates keep the list order and show the table header as their group."
                   (append (list "import" "--input" file "--preview-token" token)
                           homes maps active-args)
                   (lambda (reply failure)
+                    (let ((restored
+                           (condition-case problem
+                               (agent-dash-summary-backup-restore
+                                (agent-dash-jget reply "summaries")
+                                (agent-dash-jget reply "sessions"))
+                             (error (error-message-string problem)))))
+                      (when (buffer-live-p report)
+                        (with-current-buffer report
+                          (let ((inhibit-read-only t))
+                            (goto-char (point-max))
+                            (cond ((stringp restored)
+                                   (insert (format "\n摘要恢复失败：%s\n" restored)))
+                                  ((> restored 0)
+                                   (insert (format "\n已恢复 %d 条摘要\n" restored)))))))
+                      (when (stringp restored)
+                        (setq failure (or failure "摘要恢复失败，详见备份预览"))))
                     (when (buffer-live-p report)
                       (with-current-buffer report
                         (let ((inhibit-read-only t))
                           (goto-char (point-max))
-                          (insert (format "\n导入结果：%s\n" (if failure "有后端失败" "完成")))
+                          (insert (format "\n导入结果：%s\n" (if failure "未全部完成" "完成")))
                           (let ((notices (agent-dash-hub--backup-notices reply failure)))
                             (unless (string-empty-p notices) (insert notices "\n")))
                           (when (member "dsh" (agent-dash-jget reply "affected_backends"))
@@ -1581,7 +1617,7 @@ Candidates keep the list order and show the table header as their group."
                       (dolist (backend (agent-dash-jget reply "affected_backends"))
                         (when (member backend '("codex" "pi" "hermes"))
                           (agent-dash-hub--reload-after-conversion (intern backend)))))
-                    (message "备份导入%s" (if failure "有后端失败，详见备份预览" "完成"))))))
+                    (message "备份导入%s" (if failure "未全部完成，详见备份预览" "完成"))))))
            (error (message "备份导入已停止：%s" (error-message-string problem)))))))
     (message "正在后台预览备份…")))
 

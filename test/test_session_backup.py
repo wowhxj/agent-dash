@@ -53,6 +53,7 @@ class SessionBackupTest(unittest.TestCase):
         self.assertEqual((preview['sessions'][0]['backend'], preview['sessions'][0]['action']), ('codex', 'create'))
         result = self.cli('import', '--home', 'codex', self.dst, '--input', self.archive, '--preview-token', preview['preview_token'])
         self.assertTrue(result['backends']['codex']['rollback_path'])
+        self.assertEqual(result['summaries'], {})
         self.assertEqual((self.dst / REL).read_bytes(), (self.src / REL).read_bytes())
         self.assertEqual(self.preview()['sessions'][0]['action'], 'skip')
         legacy = self.root / 'legacy.zip'
@@ -152,6 +153,62 @@ class SessionBackupTest(unittest.TestCase):
         self.assertEqual(result['affected_backends'], ['codex'])
         retry = self.cli('preview', '--home', 'codex', self.dst, '--input', self.archive, success=False)
         self.assertEqual(retry['sessions'][0]['action'], 'skip')
+
+    def test_summaries_roundtrip_filter_busy_and_skip(self):
+        summaries = self.root / 'summaries.json'
+        key = 'codex:' + SID
+        value = {'summary': 'A summary', 'fingerprint': 'abc', 'stamp': 'today'}
+        summaries.write_text(json.dumps({key: value, 'pi:other': {'summary': 'Other'}}))
+        self.cli('export', '--home', 'codex', self.src, '--session', key,
+                 '--summaries', summaries, '--output', self.archive)
+        with zipfile.ZipFile(self.archive) as z:
+            manifest = json.loads(z.read('manifest.json'))
+            self.assertEqual(manifest['summaries']['member'], 'summaries.json')
+            self.assertEqual(json.loads(z.read('summaries.json')), {key: value})
+        args = ['--home', 'codex', self.dst, '--input', self.archive]
+        busy = self.cli('preview', *args, '--active-session', key)
+        result = self.cli('import', *args, '--active-session', key, '--preview-token', busy['preview_token'])
+        self.assertEqual(result['summaries'], {})
+        preview = self.preview()
+        result = self.cli('import', *args, '--preview-token', preview['preview_token'])
+        self.assertEqual(result['summaries'], {key: value})
+        preview = self.preview()
+        self.assertEqual(preview['sessions'][0]['action'], 'skip')
+        result = self.cli('import', *args, '--preview-token', preview['preview_token'])
+        self.assertEqual(result['summaries'], {key: value})
+        (self.dst / REL).write_text('changed\n')
+        preview = self.preview()
+        self.assertEqual(preview['sessions'][0]['action'], 'overwrite')
+        result = self.cli('import', *args, '--preview-token', preview['preview_token'])
+        self.assertEqual(result['summaries'], {key: value})
+
+    def test_summaries_validation_checksum_and_token(self):
+        summaries = self.root / 'summaries.json'
+        key = 'codex:' + SID
+        summaries.write_text(json.dumps({key: {'summary': ' '}}))
+        args = ['export', '--home', 'codex', self.src, '--session', key,
+                '--summaries', summaries, '--output', self.archive]
+        self.cli(*args, success=False)
+        self.assertFalse(self.archive.exists())
+        summaries.write_text(json.dumps({key: {'summary': 'one'}}))
+        self.cli(*args)
+        preview = self.preview()
+        with zipfile.ZipFile(self.archive) as z:
+            files = {name: z.read(name) for name in z.namelist()}
+        files['summaries.json'] = json.dumps({key: {'summary': 'two'}}).encode()
+        with zipfile.ZipFile(self.archive, 'w') as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        self.cli('preview', '--home', 'codex', self.dst, '--input', self.archive, success=False)
+        import hashlib
+        manifest = json.loads(files['manifest.json'])
+        manifest['summaries'].update(size=len(files['summaries.json']), sha256=hashlib.sha256(files['summaries.json']).hexdigest())
+        files['manifest.json'] = json.dumps(manifest).encode()
+        with zipfile.ZipFile(self.archive, 'w') as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        self.cli('import', '--home', 'codex', self.dst, '--input', self.archive,
+                 '--preview-token', preview['preview_token'], success=False)
 
     def test_zip_boundary(self):
         self.export()

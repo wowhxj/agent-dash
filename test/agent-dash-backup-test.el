@@ -43,6 +43,50 @@
       (dolist (key '("codex:a" "pi:b" "dsh:c" "hermes:e")) (should (member key args)))
       (should-not (member "claude:d" args)))))
 
+(ert-deftest agent-dash-backup-summary-export-filters-and-cleans-up ()
+  (let ((agent-dash-summary--cache (make-hash-table :test #'equal))
+        (agent-dash-summary--loaded t) summary-file)
+    (puthash "pi:same" '(:summary "项目摘要" :fingerprint "hash" :stamp "10"
+                         :model "fixture-model" :generated-at 123.5 :error "private")
+             agent-dash-summary--cache)
+    (puthash "codex:same" '(:summary "Other backend") agent-dash-summary--cache)
+    (cl-letf (((symbol-function 'agent-dash-hub--backup-run)
+               (lambda (args done)
+                 (setq summary-file (cadr (member "--summaries" args)))
+                 (with-temp-buffer
+                   (insert-file-contents summary-file)
+                   (let* ((data (agent-dash-json-read (buffer-string)))
+                          (entry (gethash "pi:same" data)))
+                     (should (= (hash-table-count data) 1))
+                     (should (equal (gethash "summary" entry) "项目摘要"))
+                     (should (equal (gethash "fingerprint" entry) "hash"))
+                     (should (equal (gethash "model" entry) "fixture-model"))
+                     (should (= (gethash "generated_at" entry) 123.5))
+                     (should-not (gethash "error" entry))))
+                 (funcall done nil nil))))
+      (agent-dash-hub--backup-export-run '("export") '((:backend pi :id "same")) #'ignore))
+    (should-not (file-exists-p summary-file))))
+
+(ert-deftest agent-dash-backup-summary-merge-persists-and-keeps-local-on-skip ()
+  (let ((agent-dash-summary-cache-file (make-temp-file "agent-dash-summary-test-"))
+        (agent-dash-summary--cache (make-hash-table :test #'equal))
+        (agent-dash-summary--loaded t)
+        (agent-dash-summary-update-hook nil))
+    (unwind-protect
+        (let ((sessions (agent-dash-json-read
+                         "[{\"backend\":\"pi\",\"id\":\"same\",\"action\":\"skip\"},{\"backend\":\"codex\",\"id\":\"same\",\"action\":\"overwrite\"},{\"backend\":\"pi\",\"id\":\"busy\",\"action\":\"busy\"}]"))
+              (summaries (agent-dash-json-read
+                          "{\"pi:same\":{\"summary\":\"source Pi\"},\"codex:same\":{\"summary\":\"source Codex\",\"stamp\":\"1\"},\"pi:busy\":{\"summary\":\"busy\"}}")))
+          (puthash "pi:same" '(:summary "local Pi") agent-dash-summary--cache)
+          (puthash "codex:same" '(:summary "local Codex") agent-dash-summary--cache)
+          (should (= 1 (agent-dash-summary-backup-restore summaries sessions)))
+          (clrhash agent-dash-summary--cache)
+          (setq agent-dash-summary--loaded nil)
+          (should (equal "local Pi" (agent-dash-summary-text '(:backend pi :id "same"))))
+          (should (equal "source Codex" (agent-dash-summary-text '(:backend codex :id "same"))))
+          (should-not (agent-dash-summary-text '(:backend pi :id "busy"))))
+      (delete-file agent-dash-summary-cache-file))))
+
 (defun agent-dash-backup-test--import-preview (action)
   "Exercise inspect, preview, and import for one session with ACTION."
   (let ((confirmations 0) calls report refreshed)

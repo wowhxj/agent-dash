@@ -89,6 +89,23 @@ def options(a, backend):
     return result
 
 
+def summary_data(data):
+    if not isinstance(data, dict):
+        raise ValueError('摘要必须是对象')
+    for key, value in data.items():
+        selection([key])
+        if (not isinstance(value, dict)
+                or set(value) - {'summary', 'fingerprint', 'stamp', 'model', 'generated_at'}
+                or not isinstance(value.get('summary'), str) or not value['summary'].strip()
+                or any(not isinstance(value[k], str) for k in ('fingerprint', 'stamp', 'model') if k in value)):
+            raise ValueError('无效摘要: ' + key)
+        if 'generated_at' in value:
+            timestamp = value['generated_at']
+            if type(timestamp) not in (int, float) or not 0 <= timestamp < 253402300800:
+                raise ValueError('无效摘要生成时间: ' + key)
+    return data
+
+
 def export(a, paths):
     sessions = selection(a.session)
     if not sessions:
@@ -96,6 +113,15 @@ def export(a, paths):
     output = Path(a.output).expanduser().absolute()
     if output.exists() or output.is_symlink():
         raise ValueError('输出文件已存在')
+    summaries = None
+    if a.summaries:
+        with open(a.summaries, 'rb') as source:
+            data = source.read(MANIFEST_LIMIT + 1)
+        if len(data) > MANIFEST_LIMIT:
+            raise ValueError('摘要超过大小限制')
+        supplied = summary_data(json.loads(data))
+        summaries = {f'{backend}:{sid}': supplied[f'{backend}:{sid}']
+                     for backend, sid in sessions if f'{backend}:{sid}' in supplied}
     groups = {}
     for backend, sid in sessions:
         groups.setdefault(backend, []).append(sid)
@@ -125,10 +151,16 @@ def export(a, paths):
                         manifest['packages'].append({'backend': backend, 'member': member, 'size': package.stat().st_size, 'sha256': file_sha(package)})
                         with package.open('rb') as source, z.open(member, 'w', force_zip64=True) as target:
                             shutil.copyfileobj(source, target, 1024 * 1024)
+                    if summaries is not None:
+                        data = canonical(summaries)
+                        if len(data) > MANIFEST_LIMIT:
+                            raise ValueError('摘要超过大小限制')
+                        manifest['summaries'] = {'member': 'summaries.json', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                        z.writestr('summaries.json', data)
                     z.writestr('manifest.json', canonical(manifest))
                 f.flush()
                 os.fsync(f.fileno())
-            with read_archive(stage) as validated:
+            with read_archive(stage) as (validated, _):
                 if set(validated) != set(packages):
                     raise ValueError('导出归档校验失败')
             os.link(stage, output)
@@ -155,7 +187,7 @@ def read_archive(path):
         if manifest.get('format') in native and manifest.get('version') == 1:
             if Path(path).stat().st_size > LIMIT:
                 raise ValueError('子包超过大小限制')
-            yield {native[manifest['format']]: Path(path)}
+            yield {native[manifest['format']]: Path(path)}, {}
             return
         if manifest.get('format') != 'agent-dash-sessions' or manifest.get('version') != 1 or not isinstance(manifest.get('packages'), list) or not manifest['packages']:
             raise ValueError('不支持的归档格式')
@@ -175,9 +207,23 @@ def read_archive(path):
                     raise ValueError('子包校验失败: ' + backend)
                 packages[backend] = package
                 used.add(member)
+            summaries = {}
+            if 'summaries' in manifest:
+                item = manifest['summaries']
+                if not isinstance(item, dict) or item.get('member') != 'summaries.json' or 'summaries.json' not in names:
+                    raise ValueError('无效摘要清单')
+                info = z.getinfo('summaries.json')
+                if info.file_size > MANIFEST_LIMIT:
+                    raise ValueError('摘要超过大小限制')
+                with z.open(info) as source:
+                    data = source.read(MANIFEST_LIMIT + 1)
+                if len(data) > MANIFEST_LIMIT or len(data) != item.get('size') or hashlib.sha256(data).hexdigest() != item.get('sha256'):
+                    raise ValueError('摘要校验失败')
+                summaries = summary_data(json.loads(data))
+                used.add('summaries.json')
             if used != set(names):
                 raise ValueError('归档含未知成员')
-            yield packages
+            yield packages, summaries
 
 
 def encode(obj):
@@ -195,12 +241,14 @@ def decode(token):
 
 
 def execute(a, paths):
-    with read_archive(a.input) as packages:
-        return execute_packages(a, paths, packages)
+    with read_archive(a.input) as (packages, summaries):
+        return execute_packages(a, paths, packages, summaries)
 
 
-def execute_packages(a, paths, packages):
+def execute_packages(a, paths, packages, summaries):
     config = {'packages': {b: file_sha(path) for b, path in packages.items()}, 'homes': paths, 'active': a.active_session, 'map': a.map}
+    if summaries:
+        config['summaries'] = hashlib.sha256(canonical(summaries)).hexdigest()
     tokens = {}
     if a.command == 'import':
         saved = decode(a.preview_token)
@@ -224,7 +272,12 @@ def execute_packages(a, paths, packages):
             sessions.extend({**item, 'backend': backend} for item in result['sessions'])
         except (ValueError, KeyError, TypeError) as e:
             errors[backend] = str(e)
-    return {'preview_token': encode({'config': config, 'tokens': tokens}), 'sessions': sessions, 'backends': results, 'errors': errors, 'affected_backends': list(results) if a.command == 'import' else []}
+    result = {'preview_token': encode({'config': config, 'tokens': tokens}), 'sessions': sessions, 'backends': results, 'errors': errors, 'affected_backends': list(results) if a.command == 'import' else []}
+    if a.command == 'import':
+        successful = {f"{item['backend']}:{item['id']}" for item in sessions
+                      if item.get('action') in ('create', 'overwrite', 'skip')}
+        result['summaries'] = {key: value for key, value in summaries.items() if key in successful}
+    return result
 
 
 def main():
@@ -235,6 +288,7 @@ def main():
     exp = commands.add_parser('export')
     exp.add_argument('--output', required=True)
     exp.add_argument('--session', action='append', default=[])
+    exp.add_argument('--summaries', help='JSON 文件：BACKEND:ID 到摘要字段的映射')
     for name in ('preview', 'import'):
         p = commands.add_parser(name)
         p.add_argument('--input', required=True)
@@ -246,7 +300,7 @@ def main():
         p.add_argument('--home', nargs=2, action='append', default=[])
     a = parser.parse_args()
     if a.command == 'inspect':
-        with read_archive(a.input) as packages:
+        with read_archive(a.input) as (packages, _):
             directories = set()
             for backend, path in packages.items():
                 reader = importlib.import_module(Path(BACKENDS[backend][1]).stem)

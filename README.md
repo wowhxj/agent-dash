@@ -98,6 +98,8 @@ DSH export also requires `python3` to build the ZIP. Enable **DeepSeek chat impo
 
 In the Hub on the old computer, press `M` to select all sessions matching the current filters, including sessions inside folded groups. Press `B s` to export the selected Codex, Pi, DSH and Hermes sessions to one ZIP. Use `m` to select individual sessions. On the new computer, press `B i` and choose the ZIP. Existing project directories are used automatically. For each missing directory, press `c` to create it at its original path or `m` to choose an existing local directory.
 
+Backups include existing Hub summaries for the sessions you export. Import restores them into the local summary cache and keeps a local summary when the session itself is identical. Older ZIPs can still be imported.
+
 The preview identifies each session by backend and session ID. Sessions in different backends may share the same ID. New sessions are imported automatically and identical sessions are skipped. The Hub asks for confirmation before replacing an existing session in the same backend. The report shows the results and where to find rollback files. Use `B i` with a reported rollback archive to recover an overwritten session. Move project code, login credentials and external files merely referenced by history separately.
 
 **Pi.** Parent sessions needed by a branch are included in the package. Import updates the project directory and parent-session paths in the native headers. Messages, tool records and branches remain available under their original session IDs.
