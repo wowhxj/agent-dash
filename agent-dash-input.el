@@ -24,6 +24,7 @@
 (declare-function agent-dash-select-model "agent-dash-ui")
 (declare-function agent-dash-dsh-set-thinking "agent-dash-dsh")
 (declare-function agent-dash-agy-set-thinking "agent-dash-agy")
+(declare-function agent-dash-agy-set-permission "agent-dash-agy")
 (declare-function agent-dash-cancel "agent-dash-ui")
 (declare-function agent-dash-quit "agent-dash-ui")
 (declare-function agent-dash-hub "agent-dash-hub")
@@ -113,6 +114,8 @@ Pi uses its native catalog without adding client-only slash names."
       (setq local (append local '(("model" . "Select a model")))))
     (when (memq backend '(dsh agy))
       (setq local (append local '(("thinking" . "Set thinking level")))))
+    (when (eq backend 'agy)
+      (setq local (append local '(("permission" . "Select the Antigravity session mode")))))
     (when (or refresh (not (agent-dash-data session :commands-loaded)))
       (agent-dash-set-data
        session :command-catalog
@@ -203,10 +206,11 @@ Native commands return nil and are dispatched through the backend protocol."
            (origin (current-buffer))
            (draft (agent-dash--input)))
       (when (or (member command '("help" "new" "resume" "dash" "stop" "quit"))
+                (and (eq backend 'agy) (equal command "permission"))
                 (and (memq backend '(dsh agy)) (equal command "thinking"))
                 (and (equal command "model") (agent-dash-capability session :models)
                      (not (and (eq backend 'pi) (not (string-empty-p args))))))
-        (unless (or (equal command "thinking") (string-empty-p args))
+        (unless (or (member command '("thinking" "permission")) (string-empty-p args))
           (user-error "/%s does not accept arguments; use its picker" command))
         (pcase command
           ("help"
@@ -223,6 +227,7 @@ Native commands return nil and are dispatched through the backend protocol."
           ("stop" (agent-dash-cancel))
           ("quit" (agent-dash-quit))
           ("model" (agent-dash-select-model))
+          ("permission" (agent-dash-agy-set-permission session args))
           ("thinking" (if (eq backend 'agy)
                           (agent-dash-agy-set-thinking session args)
                         (agent-dash-dsh-set-thinking session args))))

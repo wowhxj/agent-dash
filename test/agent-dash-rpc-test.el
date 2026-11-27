@@ -158,5 +158,23 @@
                     '(:sessionId "a" :configId "thought_level" :value "high")))
      (should-error (agent-dash-agy-set-thinking s "invalid") :type 'user-error))))
 
+(ert-deftest agent-dash-agy-test-permission-command ()
+  (with-temp-buffer
+    (let* ((agent-dash--session (agent-dash-session-create 'agy "/tmp"))
+           (mode (agent-dash-json-read
+                  "{\"id\":\"mode\",\"currentValue\":\"default\",\"options\":[{\"value\":\"default\"},{\"value\":\"accept-edits\"}]}"))
+           sent)
+      (agent-dash-set-data agent-dash--session :sid "session")
+      (agent-dash-set-data agent-dash--session :agy-mode mode)
+      (cl-letf (((symbol-function 'agent-dash--input) (lambda () "/permission accept-edits"))
+                ((symbol-function 'agent-dash--set-input) #'ignore)
+                ((symbol-function 'agent-dash-holder-request)
+                 (lambda (_session method params &optional _callback)
+                   (setq sent (cons method params)))))
+        (should (agent-dash-input-dispatch "/permission accept-edits"))
+        (should (equal sent '("session/set_config_option" :sessionId "session"
+                              :configId "mode" :value "accept-edits")))
+        (should-error (agent-dash-input-dispatch "/permission unknown") :type 'user-error)))))
+
 (provide 'agent-dash-rpc-test)
 ;;; agent-dash-rpc-test.el ends here

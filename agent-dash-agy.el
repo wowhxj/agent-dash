@@ -19,7 +19,39 @@
   "Antigravity CLI native session and settings directory."
   :type 'directory)
 
+(defcustom agent-dash-agy-magpie 'auto
+  "Whether to use Magpie's active Antigravity gateway for ACP.
+With `auto', discover Magpie for the default `agy' executable and profile.
+A string specifies a Magpie executable explicitly.  Nil uses native ACP."
+  :type '(choice (const :tag "Automatically discover Magpie" auto)
+                 (const :tag "Native ACP only" nil)
+                 (file :tag "Magpie executable")))
+
+(defcustom agent-dash-agy-default-permission nil
+  "Mode to request for new Antigravity sessions when the server offers it.
+Nil uses the server default.  Resumed sessions keep their saved mode."
+  :type '(choice (const :tag "Server default" nil)
+                 (const "default") (const "accept-edits") (const "plan")
+                 (const "auto")))
+
+(defconst agent-dash-agy--acp-launcher
+  (expand-file-name "agent-dash-agy-acp.py" (file-name-directory load-file-name))
+  "Path to the Magpie-aware ACP launcher.")
+
 (add-to-list 'agent-dash-backends 'agy t)
+
+(defun agent-dash-agy--magpie ()
+  "Return the configured Magpie executable, if enabled for this profile."
+  (cond ((stringp agent-dash-agy-magpie)
+         (or (executable-find agent-dash-agy-magpie)
+             (user-error "Cannot find Magpie executable %s" agent-dash-agy-magpie)))
+        ((and (eq agent-dash-agy-magpie 'auto)
+              (equal agent-dash-agy-executable "agy")
+              (equal (file-name-as-directory (expand-file-name agent-dash-agy-directory))
+                     (expand-file-name "~/.gemini/antigravity-cli/")))
+         (or (executable-find "magpie")
+             (let ((app "/Applications/magpie.app/Contents/MacOS/magpie"))
+               (and (file-executable-p app) app))))))
 
 (defun agent-dash-agy--executable ()
   "Return the absolute Antigravity CLI executable."
@@ -28,10 +60,14 @@
 
 (defun agent-dash-agy--command ()
   "Return the Antigravity ACP command line."
-  (let ((home (directory-file-name (expand-file-name agent-dash-agy-directory))))
-    (list (agent-dash-agy--executable) "acp"
-          "--gemini-dir" (directory-file-name (file-name-directory home))
-          "--app-data-dir" (file-name-nondirectory home))))
+  (let ((home (directory-file-name (expand-file-name agent-dash-agy-directory)))
+        (magpie (agent-dash-agy--magpie)))
+    (append (when magpie
+              (list (or (executable-find "python3") (user-error "Cannot find python3"))
+                    "-B" agent-dash-agy--acp-launcher magpie))
+            (list (agent-dash-agy--executable) "acp"
+                  "--gemini-dir" (directory-file-name (file-name-directory home))
+                  "--app-data-dir" (file-name-nondirectory home)))))
 
 (cl-defmethod agent-dash-backend-capabilities ((_ (eql agy)))
   "Return the capabilities of Antigravity."
@@ -39,6 +75,8 @@
 
 (cl-defmethod agent-dash-backend-start ((_ (eql agy)) session &optional resume-id)
   "Start SESSION or reconnect to RESUME-ID."
+  (agent-dash-set-data session :agy-initial-mode
+                       (unless resume-id agent-dash-agy-default-permission))
   (agent-dash-acp-start session (agent-dash-agy--command) resume-id #'agent-dash-agy--record))
 
 (cl-defmethod agent-dash-backend-send ((_ (eql agy)) session text images _mode)
@@ -84,6 +122,27 @@
 (cl-defmethod agent-dash-backend-set-model ((_ (eql agy)) session model)
   "Select MODEL in SESSION."
   (agent-dash-agy--set-option session (agent-dash-data session :acp-model) model))
+
+(defun agent-dash-agy-set-permission (session args)
+  "Select an advertised permission mode for SESSION, optionally via ARGS."
+  (let* ((option (agent-dash-data session :agy-mode))
+         (options (agent-dash-jget option "options"))
+         (modes (mapcar (lambda (row) (agent-dash-jget row "value")) options))
+         (current (agent-dash-jget option "currentValue")))
+    (unless modes (user-error "Antigravity has not advertised any session modes"))
+    (let* ((completion-extra-properties
+            (list :annotation-function
+                  (lambda (mode)
+                    (let ((row (seq-find (lambda (entry)
+                                           (equal mode (agent-dash-jget entry "value")))
+                                         options)))
+                      (concat "  " (agent-dash-jget row "description"))))))
+           (mode (if (string-empty-p args)
+                     (completing-read "Antigravity permission mode: " modes nil t nil nil current)
+                   args)))
+      (unless (member mode modes)
+        (user-error "Available Antigravity modes: %s" (string-join modes ", ")))
+      (agent-dash-agy--set-option session option mode))))
 
 (defun agent-dash-agy-set-thinking (session args)
   "Set the thinking level for SESSION to ARGS, or prompt for a level."
@@ -163,6 +222,21 @@ With ALLOW-PREFIX, the holder might still be replaying later prompts."
 (defun agent-dash-agy--record (session record)
   "Apply ACP RECORD to SESSION and supplement the completed history replay."
   (agent-dash-acp-record session record)
+  (let* ((update (agent-dash-jget record "params" "update"))
+         (result (agent-dash-jget record "result"))
+         (options (or (agent-dash-jget result "configOptions")
+                      (and (equal (agent-dash-jget update "sessionUpdate") "config_option_update")
+                           (agent-dash-jget update "configOptions")))))
+    (when-let* ((mode (seq-find (lambda (option) (equal (agent-dash-jget option "id") "mode"))
+                                options)))
+      (agent-dash-set-data session :agy-mode mode)
+      (when-let* ((sid (agent-dash-jget result "sessionId"))
+                  (initial (agent-dash-data session :agy-initial-mode)))
+        (agent-dash-set-data session :agy-initial-mode nil)
+        (condition-case err
+            (unless (equal initial (agent-dash-jget mode "currentValue"))
+              (agent-dash-agy-set-permission session initial))
+          (user-error (message "%s (session %s)" (error-message-string err) sid))))))
   (when-let* ((id (agent-dash-jget record "result" "sessionId")))
     (when (agent-dash-session-items session)
       (agent-dash-agy--restore-images session id agent-dash-replaying))))
