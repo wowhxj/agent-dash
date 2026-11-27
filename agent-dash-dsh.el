@@ -659,6 +659,23 @@ This runs on protocol input, never during display-only redraw."
         (when (eq ws (agent-dash-data session :socket))
           (agent-dash-dsh--disconnected session)))))))
 
+(defun agent-dash-dsh--live-directory ()
+  "Return the directory of DSH chats kept open across Emacs restarts."
+  (expand-file-name "dsh-live/" agent-dash-directory))
+
+(defun agent-dash-dsh--remember-chat (sid open)
+  "Remember SID as an OPEN chat or clear its marker when explicitly closed."
+  (when (and (stringp sid) (string-match-p "\\`[[:alnum:]_-][[:alnum:]_.-]*\\'" sid))
+    (let* ((dir (agent-dash-dsh--live-directory))
+           (file (expand-file-name sid dir)))
+      (if open
+          (progn
+            (make-directory dir t)
+            (write-region "" nil file nil 'silent))
+        (condition-case nil
+            (delete-file file)
+          (file-missing nil))))))
+
 (cl-defmethod agent-dash-backend-start ((_ (eql dsh)) session &optional resume-id)
   "DSH `agent-dash-backend-start' for SESSION and RESUME-ID."
   (let ((sid (or resume-id
@@ -683,7 +700,8 @@ This runs on protocol input, never during display-only redraw."
        'dsh session (concat "/permission " agent-dash-dsh-permission) nil nil))
     (push session agent-dash-dsh--session-list)
     (agent-dash-dsh--ensure-events)
-    (agent-dash-dsh--follow session)))
+    (agent-dash-dsh--follow session)
+    (agent-dash-dsh--remember-chat sid t)))
 
 (cl-defmethod agent-dash-backend-models ((_ (eql dsh)) session)
   "Return provider-qualified model choices for SESSION from the DSH catalog."
@@ -816,6 +834,12 @@ This runs on protocol input, never during display-only redraw."
 
 (cl-defmethod agent-dash-backend-detach ((_ (eql dsh)) session)
   "DSH `agent-dash-backend-detach' for SESSION."
+  (let ((sid (agent-dash-data session :sid)))
+    (unless (seq-some (lambda (other)
+                        (and (not (eq session other))
+                             (equal sid (agent-dash-data other :sid))))
+                      agent-dash-dsh--session-list)
+      (agent-dash-dsh--remember-chat sid nil)))
   (agent-dash-set-data session :detached t)
   (when-let* ((timer (agent-dash-data session :reconnect-timer)))
     (cancel-timer timer)
@@ -927,7 +951,9 @@ Best effort: nil when the file is missing or of another version."
 
 (cl-defmethod agent-dash-backend-sessions ((_ (eql dsh)) root)
   "DSH `agent-dash-backend-sessions' for ROOT."
-  (let ((want (and root (directory-file-name (expand-file-name root)))))
+  (let* ((want (and root (directory-file-name (expand-file-name root))))
+         (dir (agent-dash-dsh--live-directory))
+         (open (when (file-directory-p dir) (directory-files dir nil nil t))))
     (sort
      (delq nil
            (mapcar (lambda (item)
@@ -944,7 +970,8 @@ Best effort: nil when the file is missing or of another version."
                                  :subagent (equal (agent-dash-jget item "origin") "subagent")
                                  :title (agent-dash-jget item "projections" "values" "title")
                                  :time (/ (or prompt updated 0) 1000.0) :exact (and prompt t)
-                                 :running (agent-dash-jget item "running"))))))
+                                 :running (or (agent-dash-jget item "running")
+                                              (and (member id open) t)))))))
                    (agent-dash-jget (agent-dash-dsh--call "session/list"
                                                           (list :_request (make-hash-table)))
                                     "items")))

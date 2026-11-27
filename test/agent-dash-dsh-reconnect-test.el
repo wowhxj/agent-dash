@@ -141,11 +141,41 @@
       (should (= (length (agent-dash-session-items session)) 1))
       (should (equal (plist-get (agent-dash-item session "M") :text) "Missed reply")))))
 
+(ert-deftest agent-dash-dsh-remember-open-chat-across-restart ()
+  (let ((agent-dash-directory (make-temp-file "agent-dash-dsh-live-" t))
+        (agent-dash-dsh--session-list nil)
+        (agent-dash--sessions nil)
+        (session (agent-dash-session-create 'dsh "/tmp")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-dash-dsh--ensure-events) #'ignore)
+                  ((symbol-function 'agent-dash-dsh--follow) #'ignore)
+                  ((symbol-function 'agent-dash-dsh--call)
+                   (lambda (method _args)
+                     (should (equal method "session/list"))
+                     (agent-dash-json-read
+                      (concat "{\"items\":["
+                              "{\"sessionId\":\"open\",\"blank\":true,\"running\":false},"
+                              "{\"sessionId\":\"active\",\"blank\":true,\"running\":true},"
+                              "{\"sessionId\":\"saved\",\"blank\":true,\"running\":false}]}")))))
+          (agent-dash-backend-start 'dsh session "open")
+          (let* ((agent-dash-dsh--session-list nil)
+                 (rows (agent-dash-backend-sessions 'dsh nil)))
+            (should (equal (mapcar (lambda (row) (plist-get row :id))
+                                   (seq-filter #'agent-dash-hub-live-p rows))
+                           '("open" "active"))))
+          (agent-dash-backend-quit 'dsh session)
+          (should (equal (mapcar (lambda (row) (plist-get row :id))
+                                 (seq-filter #'agent-dash-hub-live-p
+                                             (agent-dash-backend-sessions 'dsh nil)))
+                         '("active"))))
+      (delete-directory agent-dash-directory t))))
+
 (ert-deftest agent-dash-dsh-permission-only-new-sessions ()
   (dolist (permission '("auto" nil))
     (let ((agent-dash-dsh-permission permission)
           (agent-dash-dsh--session-list nil) commands)
-      (cl-letf (((symbol-function 'agent-dash-dsh--call)
+      (cl-letf (((symbol-function 'agent-dash-dsh--remember-chat) #'ignore)
+                ((symbol-function 'agent-dash-dsh--call)
                  (lambda (method _args &rest _)
                    (agent-dash-json-read
                     (if (equal method "workspace/create")
