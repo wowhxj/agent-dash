@@ -23,6 +23,29 @@
   "Return the chat transcript without the editable composer."
   (buffer-substring-no-properties (point-min) agent-dash--transcript-end))
 
+(ert-deftest agent-dash-ui-test-new-session-creates-directory ()
+  (let* ((temp-root (make-temp-file "agent-dash-ui-" t))
+         (default-directory (file-name-as-directory temp-root))
+         (root (expand-file-name "new/project/"))
+         (agent-dash-backends '(fake))
+         (agent-dash-fake-calls nil)
+         session)
+    (unwind-protect
+        (cl-letf (((symbol-function 'read-directory-name)
+                   (lambda (_prompt &optional _dir _default must-match &rest _)
+                     (should-not must-match)
+                     (should-not (file-exists-p root))
+                     "new/project")))
+          (setq session (call-interactively #'agent-dash))
+          (should (file-directory-p root))
+          (should (equal (agent-dash-session-root session) root))
+          (should (equal (car agent-dash-fake-calls)
+                         (list 'start (agent-dash-session-id session) nil))))
+      (when session
+        (with-current-buffer (agent-dash-session-buffer session)
+          (let ((agent-dash--quitting t)) (kill-buffer))))
+      (delete-directory temp-root t))))
+
 (ert-deftest agent-dash-ui-test-composer-and-pinned-prompt ()
   "Decoration must not become sent text, history or reference context."
   (agent-dash-ui-test-with-chat

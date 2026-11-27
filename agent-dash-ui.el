@@ -889,10 +889,12 @@ Return the session."
 ;; Autoload the main file, which loads every backend, not just this one.
 ;;;###autoload (autoload 'agent-dash "agent-dash" "Start a new agent chat." t)
 (defun agent-dash (backend root)
-  "Start a new chat with BACKEND in directory ROOT."
+  "Start a new chat with BACKEND in directory ROOT, creating ROOT if needed."
   (interactive
    (list (agent-dash--read-backend)
-         (read-directory-name "Directory: " nil nil t)))
+         (read-directory-name "Directory: ")))
+  (setq root (file-name-as-directory (expand-file-name root)))
+  (unless (file-directory-p root) (make-directory root t))
   (agent-dash-open backend root))
 
 (defun agent-dash-resume (backend root)
